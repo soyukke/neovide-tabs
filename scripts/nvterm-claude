@@ -3,12 +3,46 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 notify_script="${script_dir}/nvterm-agent-notify"
-settings_file="$(mktemp "${TMPDIR:-/tmp}/nvterm-claude-settings.XXXXXX.json")"
+settings_file="$(mktemp "${TMPDIR:-/tmp}/nvterm-claude-settings.XXXXXX")"
+
+find_real_claude() {
+  local candidate="${NVTERM_REAL_CLAUDE:-}"
+  if [[ -n "$candidate" && -x "$candidate" && ! "$candidate" -ef "$0" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  local old_ifs="$IFS"
+  IFS=:
+  for dir in ${PATH:-}; do
+    [[ -z "$dir" ]] && dir="."
+    if [[ "$dir" == "$script_dir" || "$dir" == "${NVTERM_AGENT_SHIM_DIR:-}" ]]; then
+      continue
+    fi
+    candidate="$dir/claude"
+    if [[ -x "$candidate" && ! "$candidate" -ef "$0" ]]; then
+      IFS="$old_ifs"
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  IFS="$old_ifs"
+  return 1
+}
 
 cleanup() {
   rm -f "$settings_file"
 }
 trap cleanup EXIT
+
+real_claude="$(find_real_claude)" || {
+  echo "nvterm: claude not found in PATH" >&2
+  exit 127
+}
+
+if [[ -z "${NVTERM_AGENT_STATUS_FILE:-}" ]]; then
+  exec "$real_claude" "$@"
+fi
 
 python3 - "$notify_script" "$settings_file" <<'PY'
 import json
@@ -44,4 +78,4 @@ settings = {
 settings_file.write_text(json.dumps(settings, indent=2) + "\n")
 PY
 
-claude --settings "$settings_file" "$@"
+exec "$real_claude" --settings "$settings_file" "$@"

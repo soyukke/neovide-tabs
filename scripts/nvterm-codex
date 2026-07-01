@@ -6,7 +6,41 @@ notify_script="${script_dir}/nvterm-agent-notify"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/neovide-tabs"
 delegate_file="${state_dir}/codex-notify-delegate.json"
 
+find_real_codex() {
+  local candidate="${NVTERM_REAL_CODEX:-}"
+  if [[ -n "$candidate" && -x "$candidate" && ! "$candidate" -ef "$0" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  local old_ifs="$IFS"
+  IFS=:
+  for dir in ${PATH:-}; do
+    [[ -z "$dir" ]] && dir="."
+    if [[ "$dir" == "$script_dir" || "$dir" == "${NVTERM_AGENT_SHIM_DIR:-}" ]]; then
+      continue
+    fi
+    candidate="$dir/codex"
+    if [[ -x "$candidate" && ! "$candidate" -ef "$0" ]]; then
+      IFS="$old_ifs"
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  IFS="$old_ifs"
+  return 1
+}
+
 mkdir -p "$state_dir"
+
+real_codex="$(find_real_codex)" || {
+  echo "nvterm: codex not found in PATH" >&2
+  exit 127
+}
+
+if [[ -z "${NVTERM_AGENT_STATUS_FILE:-}" ]]; then
+  exec "$real_codex" "$@"
+fi
 
 notify_value="$(
   python3 - "$notify_script" "$delegate_file" <<'PY'
@@ -35,4 +69,4 @@ print(json.dumps(command, ensure_ascii=False))
 PY
 )"
 
-codex -c "notify=${notify_value}" "$@"
+exec "$real_codex" -c "notify=${notify_value}" "$@"

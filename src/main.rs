@@ -13,6 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use anyhow::{Context, Result, anyhow};
 use libghostty_vt::{
     RenderState, Terminal, TerminalOptions,
@@ -273,6 +276,14 @@ fn agent_status_dir() -> Option<PathBuf> {
 
 fn agent_status_path(dir: Option<&Path>, pane_id: PaneId) -> Option<PathBuf> {
     dir.map(|dir| dir.join(format!("pane-{}.status.toml", pane_id.0)))
+}
+
+fn agent_shim_dir(pane_id: PaneId) -> Option<PathBuf> {
+    if let Some(root) = env::var_os("NVTERM_AGENT_SHIM_ROOT").filter(|path| !path.is_empty()) {
+        return Some(PathBuf::from(root).join(format!("pane-{}", pane_id.0)));
+    }
+
+    app_state_dir().map(|path| path.join("shims").join(format!("pane-{}", pane_id.0)))
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -4035,6 +4046,78 @@ impl Viewport {
     }
 }
 
+fn install_agent_command_shims(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir)
+        .with_context(|| format!("failed to create agent shim dir {}", dir.display()))?;
+    write_agent_command_shim(dir, "claude", "nvterm-claude")?;
+    write_agent_command_shim(dir, "codex", "nvterm-codex")?;
+    Ok(())
+}
+
+fn write_agent_command_shim(dir: &Path, command_name: &str, wrapper_name: &str) -> Result<()> {
+    let wrapper = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join(wrapper_name);
+    let target = dir.join(command_name);
+    let contents = format!(
+        "#!/usr/bin/env bash\nexec {} \"$@\"\n",
+        shell_single_quote(&wrapper.to_string_lossy())
+    );
+    fs::write(&target, contents)
+        .with_context(|| format!("failed to write agent shim {}", target.display()))?;
+    set_executable(&target)?;
+    Ok(())
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn set_executable(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
+fn find_executable_in_path(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    let current_shim_dir = env::var_os("NVTERM_AGENT_SHIM_DIR").map(PathBuf::from);
+    let shim_root = env::var_os("NVTERM_AGENT_SHIM_ROOT")
+        .map(PathBuf::from)
+        .or_else(|| app_state_dir().map(|path| path.join("shims")));
+
+    env::split_paths(&path)
+        .filter(|dir| {
+            current_shim_dir.as_deref() != Some(dir.as_path())
+                && !shim_root
+                    .as_deref()
+                    .is_some_and(|root| dir.starts_with(root))
+        })
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -4066,6 +4149,26 @@ impl PtySession {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("NVTERM_PROTO", "libghostty-vt");
         cmd.env("NVTERM_PANE_ID", pane_id.0.to_string());
+        let real_claude = find_executable_in_path("claude");
+        let real_codex = find_executable_in_path("codex");
+        if let Some(shim_dir) = agent_shim_dir(pane_id) {
+            if install_agent_command_shims(&shim_dir).is_ok() {
+                cmd.env("NVTERM_AGENT_SHIM_DIR", &shim_dir);
+                if let Some(path) = real_claude {
+                    cmd.env("NVTERM_REAL_CLAUDE", path);
+                }
+                if let Some(path) = real_codex {
+                    cmd.env("NVTERM_REAL_CODEX", path);
+                }
+                if let Some(path) = env::var_os("PATH") {
+                    let mut paths = vec![shim_dir];
+                    paths.extend(env::split_paths(&path));
+                    if let Ok(joined) = env::join_paths(paths) {
+                        cmd.env("PATH", joined);
+                    }
+                }
+            }
+        }
         if let Some(agent_status_path) = agent_status_path {
             if let Some(parent) = agent_status_path.parent() {
                 let _ = fs::create_dir_all(parent);

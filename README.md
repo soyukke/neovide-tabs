@@ -131,18 +131,22 @@ over screen-text detection:
 ./scripts/nvterm-agent-status failed "tests failed"
 ```
 
-Claude Code and Codex can be wired to the same status path without changing
-global config files:
+Each terminal pane prepends a pane-local shim directory to `PATH`, so Claude
+Code and Codex can be started normally while still writing to the same status
+path:
 
 ```sh
-just agent-claude
-just agent-codex
+claude
+claude --permission-mode bypassPermissions
+codex --yolo
+codex --sandbox danger-full-access --ask-for-approval never
 ```
 
-Those wrappers launch the agent with per-invocation hooks only. Claude Code gets
-a temporary `--settings` file for `UserPromptSubmit`, `Notification`, and
-`Stop`. Codex gets a `-c notify=...` override for the current process. Existing
-Codex `notify` command arrays are delegated at runtime under
+Inside neovide-tabs only, `claude` resolves through a wrapper that adds a
+temporary `--settings` file for `UserPromptSubmit`, `Notification`, and `Stop`.
+`codex` resolves through a wrapper that adds a per-invocation `-c notify=...`
+override. Global `~/.claude/settings.json` and `~/.codex/config.toml` are not
+modified. Existing Codex `notify` command arrays are delegated at runtime under
 `$XDG_STATE_HOME/neovide-tabs` or `~/.local/state/neovide-tabs`.
 
 The heuristic Claude Code / Codex watcher is a fallback for unwrapped shells. It

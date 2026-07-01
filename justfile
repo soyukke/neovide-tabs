@@ -22,14 +22,6 @@ alias launch := terminal
 agent-status state summary="":
     @./scripts/nvterm-agent-status "{{state}}" "{{summary}}"
 
-# Launch Claude Code with per-invocation neovide-tabs notification hooks.
-agent-claude:
-    @./scripts/nvterm-claude
-
-# Launch Codex with per-invocation neovide-tabs notification hooks.
-agent-codex:
-    @./scripts/nvterm-codex
-
 # Check the Rust crate.
 check:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just check; else cargo check; fi
