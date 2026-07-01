@@ -742,7 +742,11 @@ impl TerminalPane {
     }
 
     fn has_running_agent(&self) -> bool {
-        self.agent_status.is_running() || self.agent_monitor.is_busy()
+        should_show_agent_spinner(
+            self.agent_status.has_status(),
+            self.agent_status.is_running(),
+            self.agent_monitor.is_busy(),
+        )
     }
 
     fn frame(
@@ -3808,6 +3812,10 @@ impl AgentStatusFileMonitor {
             .as_ref()
             .is_some_and(|key| is_terminal_agent_running_status(&key.state))
     }
+
+    fn has_status(&self) -> bool {
+        self.last_key.is_some()
+    }
 }
 
 fn read_agent_status(path: &Path) -> Option<AgentStatusKey> {
@@ -3841,6 +3849,14 @@ fn is_terminal_agent_status(state: &str) -> bool {
 
 fn is_terminal_agent_running_status(state: &str) -> bool {
     matches!(state, "running" | "busy" | "working")
+}
+
+fn should_show_agent_spinner(status_seen: bool, status_running: bool, screen_busy: bool) -> bool {
+    if status_seen {
+        status_running
+    } else {
+        screen_busy
+    }
 }
 
 fn agent_status_notification(
@@ -4372,6 +4388,7 @@ mod tests {
         cursor_animation_length, cursor_trail_rect, default_keybindings, detect_output_scroll_rows,
         detect_upward_row_shift, format_binding, keybinding, parse_file_uri_path, parse_key_chord,
         percent_decode_utf8, read_agent_status, resolve_keybinding, session_title_number,
+        should_show_agent_spinner,
     };
 
     fn scrollbar(top: u64, visible: u64, total: u64) -> ScrollbarView {
@@ -4930,6 +4947,14 @@ updated_token = "2"
         .unwrap();
         assert!(monitor.update("work", PaneId(7)).is_some());
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn agent_spinner_prefers_explicit_status_over_screen_busy() {
+        assert!(should_show_agent_spinner(false, false, true));
+        assert!(should_show_agent_spinner(true, true, true));
+        assert!(!should_show_agent_spinner(true, false, true));
+        assert!(!should_show_agent_spinner(true, false, false));
     }
 
     #[test]
