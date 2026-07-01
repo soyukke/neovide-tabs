@@ -36,6 +36,8 @@ just check       # cargo check
 just lint        # clippy with -D warnings
 just test        # cargo test
 just fmt         # cargo fmt
+just precommit   # fmt --check + lint + test
+just install-hooks # use repo-managed Git hooks
 just verify      # fmt --check + check + lint + test
 just doctor      # print tool versions and selected font
 ```
@@ -49,6 +51,11 @@ core, Metal renderer, and Kitty graphics protocol support.
 The Rust lint gate is intentionally strict: `just verify` runs
 `cargo clippy --all-targets --all-features -- -D warnings`. New code should
 either satisfy the lint or have a narrow, explicit reason for an allow.
+
+Git pre-commit hooks live in [`.githooks`](.githooks). Run `just install-hooks`
+once per clone to make Git use them. The pre-commit hook runs `just precommit`,
+which performs `cargo fmt -- --check`, Clippy with `-D warnings`, and
+`cargo test`.
 
 Native macOS shell exploration lives in [`spikes/macos-shell`](spikes/macos-shell).
 It is intentionally separate from the current `macroquad` prototype.

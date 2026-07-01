@@ -55,6 +55,16 @@ test:
 lint:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just lint; else cargo clippy --all-targets --all-features -- -D warnings; fi
 
+# Run the checks enforced by the Git pre-commit hook.
+precommit:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just precommit; else cargo fmt -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test; fi
+
+# Configure this clone to use the repository-managed Git hooks.
+install-hooks:
+    @git config core.hooksPath .githooks
+    @chmod +x .githooks/pre-commit
+    @echo "Git hooks installed from .githooks"
+
 # Format Rust sources.
 fmt:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just fmt; else cargo fmt; fi
