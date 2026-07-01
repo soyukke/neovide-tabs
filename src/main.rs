@@ -1,7 +1,8 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, hash_map::DefaultHasher},
     env, fs,
+    hash::{Hash, Hasher},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
@@ -31,8 +32,9 @@ use serde::Deserialize;
 
 use neovide_tabs::{
     core::{
-        KittyGraphicsState, KittyGraphicsTracker, PaneId, PaneLayout, SessionPaneState,
-        SessionState, SessionTabState, SplitAxis,
+        KittyCellPosition, KittyGraphicsState, KittyGraphicsTracker, KittyImageFormat,
+        KittyImageResource, KittyPlacementKey, KittyTransmission, PaneId, PaneLayout,
+        SessionPaneState, SessionState, SessionTabState, SplitAxis,
     },
     scroll::SmoothScroll,
 };
@@ -395,6 +397,7 @@ struct TerminalPane {
     osc: OscTracker,
     kitty: KittyGraphicsTracker,
     graphics: KittyGraphicsState,
+    image_textures: TerminalImageTextureCache,
     agent_status: AgentStatusFileMonitor,
     agent_monitor: AgentMonitor,
     smooth_scroll: SmoothScroll,
@@ -445,6 +448,7 @@ impl TerminalPane {
             osc: OscTracker::new(),
             kitty: KittyGraphicsTracker::new(),
             graphics: KittyGraphicsState::new(),
+            image_textures: TerminalImageTextureCache::new(),
             agent_status: AgentStatusFileMonitor::new(agent_status_path),
             agent_monitor: AgentMonitor::new(),
             smooth_scroll: SmoothScroll::new(),
@@ -567,7 +571,8 @@ impl TerminalPane {
 
         self.smooth_scroll.update(dt);
 
-        let frame = self.renderer.collect(&mut self.terminal)?;
+        let mut frame = self.renderer.collect(&mut self.terminal)?;
+        frame.images = self.image_textures.frame_images(&self.graphics);
         let animated_cursor = self.cursor_motion.update(frame.cursor, dt);
 
         if self.last_wheel_at.is_none()
@@ -2906,7 +2911,11 @@ fn drain_pty(
         }
         events.notifications.extend(chunk_events.notifications);
         for command in trackers.kitty.push(&bytes) {
-            let _ = trackers.graphics.apply(command);
+            let cell = KittyCellPosition {
+                col: terminal.cursor_x().unwrap_or(0),
+                row: terminal.cursor_y().unwrap_or(0),
+            };
+            let _ = trackers.graphics.apply_at(command, cell);
         }
         terminal.vt_write(&bytes);
 
@@ -3367,6 +3376,8 @@ fn draw_frame(request: DrawFrameRequest<'_>) {
         }
     }
 
+    draw_frame_images(frame, viewport, rect, y_offset);
+
     if let Some(cursor) = animated_cursor {
         draw_cursor(frame, viewport, rect, fonts, cursor, y_offset);
     }
@@ -3385,6 +3396,66 @@ fn draw_frame(request: DrawFrameRequest<'_>) {
     }
 
     draw_scroll_indicator(frame, rect);
+}
+
+fn draw_frame_images(frame: &TerminalFrame, viewport: Viewport, rect: Rect, y_offset: f32) {
+    for image in &frame.images {
+        let dest_size = terminal_image_dest_size(
+            image.pixel_width,
+            image.pixel_height,
+            image.columns,
+            image.rows,
+            viewport.metrics,
+        );
+        let x = rect.x + image.col as f32 * viewport.metrics.cell_width;
+        let y = rect.y + image.row as f32 * viewport.metrics.cell_height + y_offset;
+
+        if x > rect.x + rect.w
+            || x + dest_size.x < rect.x
+            || y > rect.y + rect.h
+            || y + dest_size.y < rect.y
+        {
+            continue;
+        }
+
+        draw_texture_ex(
+            &image.texture,
+            x,
+            y,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(dest_size),
+                ..Default::default()
+            },
+        );
+    }
+}
+
+fn terminal_image_dest_size(
+    pixel_width: u16,
+    pixel_height: u16,
+    columns: Option<u32>,
+    rows: Option<u32>,
+    metrics: CellMetrics,
+) -> Vec2 {
+    let natural_width = pixel_width.max(1) as f32;
+    let natural_height = pixel_height.max(1) as f32;
+
+    match (columns, rows) {
+        (Some(columns), Some(rows)) => vec2(
+            columns.max(1) as f32 * metrics.cell_width,
+            rows.max(1) as f32 * metrics.cell_height,
+        ),
+        (Some(columns), None) => {
+            let width = columns.max(1) as f32 * metrics.cell_width;
+            vec2(width, width * natural_height / natural_width)
+        }
+        (None, Some(rows)) => {
+            let height = rows.max(1) as f32 * metrics.cell_height;
+            vec2(height * natural_width / natural_height, height)
+        }
+        (None, None) => vec2(natural_width, natural_height),
+    }
 }
 
 fn draw_cursor(
@@ -3737,6 +3808,7 @@ impl TerminalRenderer {
 
         Ok(TerminalFrame {
             rows,
+            images: Vec::new(),
             background,
             cursor_color,
             cursor,
@@ -3749,13 +3821,130 @@ impl TerminalRenderer {
     }
 }
 
-#[derive(Clone, Debug)]
 struct TerminalFrame {
     rows: Vec<Vec<CellView>>,
+    images: Vec<TerminalFrameImage>,
     background: Color,
     cursor_color: Color,
     cursor: Option<CursorView>,
     scrollbar: ScrollbarView,
+}
+
+struct TerminalFrameImage {
+    key: KittyPlacementKey,
+    texture: Texture2D,
+    col: u16,
+    row: u16,
+    columns: Option<u32>,
+    rows: Option<u32>,
+    pixel_width: u16,
+    pixel_height: u16,
+    z_index: i32,
+}
+
+#[derive(Default)]
+struct TerminalImageTextureCache {
+    textures: HashMap<u32, CachedTerminalImageTexture>,
+}
+
+impl TerminalImageTextureCache {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn frame_images(&mut self, graphics: &KittyGraphicsState) -> Vec<TerminalFrameImage> {
+        self.textures
+            .retain(|image_id, _| graphics.image(*image_id).is_some());
+
+        let mut images = Vec::new();
+        for placement in graphics.placements() {
+            let Some(resource) = graphics.image(placement.key.image_id) else {
+                continue;
+            };
+            let Some(texture) = self.texture_for(resource) else {
+                continue;
+            };
+            images.push(TerminalFrameImage {
+                key: placement.key,
+                texture: texture.texture.weak_clone(),
+                col: placement.cell.col,
+                row: placement.cell.row,
+                columns: placement.columns,
+                rows: placement.rows,
+                pixel_width: texture.pixel_width,
+                pixel_height: texture.pixel_height,
+                z_index: placement.z_index,
+            });
+        }
+
+        images.sort_by_key(|image| (image.z_index, image.key.image_id, image.key.placement_id));
+        images
+    }
+
+    fn texture_for(
+        &mut self,
+        resource: &KittyImageResource,
+    ) -> Option<&CachedTerminalImageTexture> {
+        let signature = image_resource_signature(resource);
+        if self
+            .textures
+            .get(&resource.id)
+            .is_some_and(|cached| cached.signature == signature)
+        {
+            return self.textures.get(&resource.id);
+        }
+
+        let texture = decode_terminal_image_texture(resource, signature)?;
+        self.textures.insert(resource.id, texture);
+        self.textures.get(&resource.id)
+    }
+}
+
+struct CachedTerminalImageTexture {
+    signature: u64,
+    texture: Texture2D,
+    pixel_width: u16,
+    pixel_height: u16,
+}
+
+fn decode_terminal_image_texture(
+    resource: &KittyImageResource,
+    signature: u64,
+) -> Option<CachedTerminalImageTexture> {
+    if !resource.complete || resource.format != Some(KittyImageFormat::Png) {
+        return None;
+    }
+    if !matches!(
+        resource.transmission,
+        None | Some(KittyTransmission::Direct)
+    ) {
+        return None;
+    }
+
+    let rgba = image::load_from_memory(&resource.bytes).ok()?.to_rgba8();
+    let pixel_width = u16::try_from(rgba.width()).ok()?;
+    let pixel_height = u16::try_from(rgba.height()).ok()?;
+    if pixel_width == 0 || pixel_height == 0 {
+        return None;
+    }
+
+    let texture = Texture2D::from_rgba8(pixel_width, pixel_height, rgba.as_raw());
+    texture.set_filter(FilterMode::Linear);
+    Some(CachedTerminalImageTexture {
+        signature,
+        texture,
+        pixel_width,
+        pixel_height,
+    })
+}
+
+fn image_resource_signature(resource: &KittyImageResource) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    resource.format.hash(&mut hasher);
+    resource.transmission.hash(&mut hasher);
+    resource.complete.hash(&mut hasher);
+    resource.bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -4534,17 +4723,18 @@ mod tests {
     };
 
     use super::{
-        AgentKind, AgentScreenState, AgentStatusFileMonitor, AppCommand, AppConfig, CellView,
-        CursorMotion, CursorTrailRect, CursorView, CursorVisualStyle, InputContext, KeyChord,
-        OUTPUT_SCROLL_ANIMATION_FAR_LINES, PaneId, PaneLayout, ScrollbarView, SessionPaneState,
-        SessionState, SessionTabState, SplitAxis, StoredPaneLayout, StoredSplitAxis, THEMES,
-        TabMenuAction, TerminalInput, TextEdit, TextInputEvent, animation_alpha,
-        app_command_for_key, applescript_string, binding_for_command, bounded_scroll_rows,
-        classify_agent_screen, configured_keybindings, cursor_animation_length, cursor_trail_rect,
-        default_keybindings, detect_output_scroll_rows, detect_upward_row_shift, format_binding,
-        keybinding, parse_file_uri_path, parse_key_chord, percent_decode_utf8, read_agent_status,
-        resolve_keybinding, session_title_number, should_show_agent_spinner, tab_label,
-        tab_menu_action_at, tab_menu_item_rect,
+        AgentKind, AgentScreenState, AgentStatusFileMonitor, AppCommand, AppConfig, CellMetrics,
+        CellView, CursorMotion, CursorTrailRect, CursorView, CursorVisualStyle, InputContext,
+        KeyChord, OUTPUT_SCROLL_ANIMATION_FAR_LINES, PaneId, PaneLayout, ScrollbarView,
+        SessionPaneState, SessionState, SessionTabState, SplitAxis, StoredPaneLayout,
+        StoredSplitAxis, THEMES, TabMenuAction, TerminalInput, TextEdit, TextInputEvent,
+        animation_alpha, app_command_for_key, applescript_string, binding_for_command,
+        bounded_scroll_rows, classify_agent_screen, configured_keybindings,
+        cursor_animation_length, cursor_trail_rect, default_keybindings, detect_output_scroll_rows,
+        detect_upward_row_shift, format_binding, keybinding, parse_file_uri_path, parse_key_chord,
+        percent_decode_utf8, read_agent_status, resolve_keybinding, session_title_number,
+        should_show_agent_spinner, tab_label, tab_menu_action_at, tab_menu_item_rect,
+        terminal_image_dest_size,
     };
 
     fn scrollbar(top: u64, visible: u64, total: u64) -> ScrollbarView {
@@ -4609,6 +4799,32 @@ mod tests {
             Some(TabMenuAction::Theme(THEMES.len() - 1))
         );
         assert_eq!(tab_menu_action_at(menu, vec2(0.0, 0.0)), None);
+    }
+
+    #[test]
+    fn terminal_image_dest_size_uses_cell_dimensions_when_provided() {
+        let metrics = CellMetrics {
+            cell_width: 9.0,
+            cell_height: 18.0,
+            baseline: 14.0,
+        };
+
+        assert_eq!(
+            terminal_image_dest_size(20, 10, Some(4), Some(2), metrics),
+            vec2(36.0, 36.0)
+        );
+        assert_eq!(
+            terminal_image_dest_size(20, 10, Some(4), None, metrics),
+            vec2(36.0, 18.0)
+        );
+        assert_eq!(
+            terminal_image_dest_size(20, 10, None, Some(2), metrics),
+            vec2(72.0, 36.0)
+        );
+        assert_eq!(
+            terminal_image_dest_size(20, 10, None, None, metrics),
+            vec2(20.0, 10.0)
+        );
     }
 
     #[test]

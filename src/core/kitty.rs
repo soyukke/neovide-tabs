@@ -148,7 +148,7 @@ impl KittyGraphicsAction {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum KittyImageFormat {
     Rgb,
     Rgba,
@@ -168,7 +168,7 @@ impl KittyImageFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum KittyTransmission {
     Direct,
     File,
@@ -212,8 +212,28 @@ impl KittyGraphicsState {
         }
     }
 
+    pub fn apply_at(
+        &mut self,
+        command: KittyGraphicsCommand,
+        cell: KittyCellPosition,
+    ) -> Vec<KittyGraphicsEvent> {
+        match command.action {
+            KittyGraphicsAction::Delete => self.delete(command.image_id, command.placement_id),
+            KittyGraphicsAction::Transmit
+            | KittyGraphicsAction::TransmitAndDisplay
+            | KittyGraphicsAction::Display => self.upsert_at(command, cell),
+            KittyGraphicsAction::Query | KittyGraphicsAction::Unknown(_) => {
+                vec![KittyGraphicsEvent::Unsupported]
+            }
+        }
+    }
+
     pub fn image(&self, id: u32) -> Option<&KittyImageResource> {
         self.images.get(&id)
+    }
+
+    pub fn image_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.images.keys().copied()
     }
 
     pub fn placements(&self) -> impl Iterator<Item = &KittyImagePlacement> {
@@ -221,6 +241,14 @@ impl KittyGraphicsState {
     }
 
     fn upsert(&mut self, command: KittyGraphicsCommand) -> Vec<KittyGraphicsEvent> {
+        self.upsert_at(command, KittyCellPosition::default())
+    }
+
+    fn upsert_at(
+        &mut self,
+        command: KittyGraphicsCommand,
+        cell: KittyCellPosition,
+    ) -> Vec<KittyGraphicsEvent> {
         let Some(image_id) = command.image_id else {
             return vec![KittyGraphicsEvent::Unsupported];
         };
@@ -254,6 +282,7 @@ impl KittyGraphicsState {
                 key,
                 KittyImagePlacement {
                     key,
+                    cell,
                     columns: command.columns,
                     rows: command.rows,
                     z_index: command.z_index.unwrap_or(0),
@@ -323,9 +352,16 @@ pub struct KittyPlacementKey {
     pub placement_id: u32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KittyCellPosition {
+    pub col: u16,
+    pub row: u16,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KittyImagePlacement {
     pub key: KittyPlacementKey,
+    pub cell: KittyCellPosition,
     pub columns: Option<u32>,
     pub rows: Option<u32>,
     pub z_index: i32,
@@ -394,8 +430,8 @@ fn parse_u8(value: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        KittyGraphicsAction, KittyGraphicsEvent, KittyGraphicsState, KittyGraphicsTracker,
-        KittyImageFormat, KittyPlacementKey, KittyTransmission,
+        KittyCellPosition, KittyGraphicsAction, KittyGraphicsEvent, KittyGraphicsState,
+        KittyGraphicsTracker, KittyImageFormat, KittyPlacementKey, KittyTransmission,
     };
 
     #[test]
@@ -439,6 +475,17 @@ mod tests {
         assert_eq!(image.bytes, b"abc");
         assert!(image.complete);
         assert_eq!(state.placements().count(), 1);
+    }
+
+    #[test]
+    fn state_records_display_cell_position() {
+        let command = KittyGraphicsTracker::new().push(b"\x1b_Ga=T,i=9,p=1;YQ==\x1b\\");
+        let mut state = KittyGraphicsState::new();
+
+        state.apply_at(command[0].clone(), KittyCellPosition { col: 12, row: 3 });
+
+        let placement = state.placements().next().expect("placement should exist");
+        assert_eq!(placement.cell, KittyCellPosition { col: 12, row: 3 });
     }
 
     #[test]

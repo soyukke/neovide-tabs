@@ -30,6 +30,7 @@ just terminal
 just             # list recipes
 just terminal    # launch the terminal prototype
 just native-spike # build and run the AppKit/Metal spike
+just kitty-smoke # emit a tiny Kitty protocol PNG
 just adr         # list Architecture Decision Records
 just adr-new     # create a new ADR
 just check       # cargo check

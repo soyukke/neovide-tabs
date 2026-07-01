@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+payload='iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAALUlEQVR4nGP4fyHtPz7MAGPUbP9/BxmjKIAJIEvCaAZ0CXQ+8QrwWkHQkfgwANw5yXESetimAAAAAElFTkSuQmCC'
+
+printf 'kitty graphics smoke:\n'
+printf '\033_Ga=T,f=100,t=d,i=4242,p=1,c=8,r=4;%s\033\\\n' "$payload"
+printf '\n'

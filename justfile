@@ -39,6 +39,10 @@ native-spike:
     @swiftc spikes/macos-shell/NativeShellSpike.swift -framework AppKit -framework MetalKit -o spikes/macos-shell/.build/NativeShellSpike
     @exec spikes/macos-shell/.build/NativeShellSpike
 
+# Emit a tiny Kitty graphics protocol PNG in the current terminal.
+kitty-smoke:
+    @./scripts/kitty-image-smoke
+
 # Update the current neovide-tabs pane's agent status.
 agent-status state summary="":
     @./scripts/nvterm-agent-status "{{state}}" "{{summary}}"
