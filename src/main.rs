@@ -2954,6 +2954,10 @@ impl EventHandler for TerminalInput {
             return;
         }
 
+        if is_appkit_function_key_char(character) {
+            return;
+        }
+
         if self.context == InputContext::Rename {
             if !character.is_control() {
                 self.text_chars.push(character);
@@ -2985,6 +2989,10 @@ fn app_command_for_key(keycode: KeyCode, keymods: KeyMods) -> Option<AppCommand>
 
 fn is_c0_control(ch: char) -> bool {
     matches!(ch as u32, 0x01..=0x1f)
+}
+
+fn is_appkit_function_key_char(ch: char) -> bool {
+    matches!(ch as u32, 0xf700..=0xf8ff)
 }
 
 fn handle_mouse_wheel(
@@ -4492,6 +4500,46 @@ mod tests {
         input.key_down_event(KeyCode::U, keymods, false);
 
         assert!(input.bytes.is_empty());
+    }
+
+    #[test]
+    fn terminal_input_drops_appkit_arrow_function_char_after_arrow_key() {
+        let mut input = TerminalInput::default();
+
+        input.key_down_event(KeyCode::Up, KeyMods::default(), false);
+        input.char_event(char::from_u32(0xf700).unwrap(), KeyMods::default(), false);
+
+        assert_eq!(input.bytes, b"\x1b[A");
+    }
+
+    #[test]
+    fn terminal_input_drops_appkit_function_char_without_key_event() {
+        let mut input = TerminalInput::default();
+
+        input.char_event(char::from_u32(0xf701).unwrap(), KeyMods::default(), false);
+
+        assert!(input.bytes.is_empty());
+    }
+
+    #[test]
+    fn rename_input_drops_appkit_function_key_chars() {
+        let mut input = TerminalInput::new(false, InputContext::Rename, &default_keybindings());
+
+        input.char_event('a', KeyMods::default(), false);
+        input.char_event(char::from_u32(0xf702).unwrap(), KeyMods::default(), false);
+
+        assert_eq!(input.text_chars, vec!['a']);
+    }
+
+    #[test]
+    fn terminal_input_keeps_non_appkit_private_use_chars() {
+        let mut input = TerminalInput::default();
+        let ch = char::from_u32(0xe0b0).unwrap();
+        let mut expected = [0; 4];
+
+        input.char_event(ch, KeyMods::default(), false);
+
+        assert_eq!(input.bytes, ch.encode_utf8(&mut expected).as_bytes());
     }
 
     #[test]
