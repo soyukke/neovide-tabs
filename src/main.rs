@@ -38,6 +38,11 @@ const WHEEL_SETTLE_AFTER: Duration = Duration::from_millis(140);
 const TAB_BAR_HEIGHT: f32 = 34.0;
 const TAB_MIN_WIDTH: f32 = 118.0;
 const TAB_MAX_WIDTH: f32 = 220.0;
+const TAB_MENU_WIDTH: f32 = 182.0;
+const TAB_MENU_PADDING: f32 = 5.0;
+const TAB_MENU_ROW_HEIGHT: f32 = 26.0;
+const TAB_MENU_SEPARATOR_HEIGHT: f32 = 7.0;
+const TAB_MENU_RADIUS: f32 = 9.0;
 const PANE_GAP: f32 = 2.0;
 const MIN_PANE_COLS: f32 = 8.0;
 const MIN_PANE_ROWS: f32 = 3.0;
@@ -976,12 +981,25 @@ enum InputMode {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TabContextMenu {
+    tab_index: usize,
+    pos: Vec2,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabMenuAction {
+    Rename,
+    Theme(usize),
+}
+
 struct AppState {
     tabs: Vec<TerminalTab>,
     active_tab: usize,
     next_tab_id: usize,
     next_pane_id: usize,
     input_mode: InputMode,
+    tab_menu: Option<TabContextMenu>,
     keybindings: Vec<KeyBinding>,
     default_theme_index: usize,
     notifications: NotificationSettings,
@@ -1005,6 +1023,7 @@ impl AppState {
             next_tab_id: 1,
             next_pane_id: 1,
             input_mode: InputMode::Terminal,
+            tab_menu: None,
             keybindings: configured_keybindings(config)?,
             default_theme_index: configured_theme_index(config),
             notifications: NotificationSettings::from_config(config),
@@ -1274,6 +1293,10 @@ impl AppState {
             return Ok(false);
         }
 
+        if self.handle_tab_menu_input(&input) {
+            return Ok(false);
+        }
+
         if self.is_renaming() && self.handle_rename_input(&input) {
             return Ok(false);
         }
@@ -1327,8 +1350,30 @@ impl AppState {
         set_keybinding(&mut self.keybindings, command, chord);
     }
 
+    fn handle_tab_menu_input(&mut self, input: &TerminalInput) -> bool {
+        if self.tab_menu.is_none() {
+            return false;
+        }
+
+        if input.bytes == b"\x1b" {
+            self.tab_menu = None;
+            return true;
+        }
+
+        false
+    }
+
     fn begin_rename_active_tab(&mut self) {
-        let title = self.active_tab().title.clone();
+        self.begin_rename_tab(self.active_tab);
+    }
+
+    fn begin_rename_tab(&mut self, tab_idx: usize) {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        let title = tab.title.clone();
+        self.active_tab = tab_idx;
+        self.tab_menu = None;
         self.input_mode = InputMode::Rename {
             buffer: title,
             replace_on_type: true,
@@ -1395,6 +1440,7 @@ impl AppState {
         content_rect: Rect,
         metrics: CellMetrics,
     ) -> Result<bool> {
+        self.tab_menu = None;
         match command {
             AppCommand::NewTab => self.new_tab(content_rect, metrics)?,
             AppCommand::SplitVertical => {
@@ -1471,11 +1517,39 @@ impl AppState {
     }
 
     fn cycle_theme(&mut self) -> Result<()> {
-        let tab = self.active_tab_mut();
-        tab.theme_index = (tab.theme_index + 1) % THEMES.len();
-        tab.apply_theme()?;
-        self.mark_session_dirty();
+        let theme_index = (self.active_tab().theme_index + 1) % THEMES.len();
+        self.set_tab_theme(self.active_tab, theme_index)
+    }
+
+    fn set_tab_theme(&mut self, tab_idx: usize, theme_index: usize) -> Result<()> {
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return Ok(());
+        };
+        if theme_index >= THEMES.len() {
+            return Ok(());
+        }
+
+        if tab.theme_index != theme_index {
+            tab.theme_index = theme_index;
+            tab.apply_theme()?;
+            self.mark_session_dirty();
+        }
         Ok(())
+    }
+
+    fn open_tab_context_menu(&mut self, tab_idx: usize, pos: Vec2) {
+        if tab_idx >= self.tabs.len() {
+            return;
+        }
+        if self.active_tab != tab_idx {
+            self.active_tab = tab_idx;
+            self.mark_session_dirty();
+        }
+        self.input_mode = InputMode::Terminal;
+        self.tab_menu = Some(TabContextMenu {
+            tab_index: tab_idx,
+            pos,
+        });
     }
 
     fn handle_mouse(&mut self, content_rect: Rect, metrics: CellMetrics) -> Result<()> {
@@ -1483,16 +1557,29 @@ impl AppState {
             return Ok(());
         }
 
+        if self.handle_tab_context_menu_mouse()? {
+            return Ok(());
+        }
+
+        if is_mouse_button_pressed(MouseButton::Right) {
+            let (x, y) = mouse_position();
+            let pos = vec2(x, y);
+            if y < TAB_BAR_HEIGHT {
+                if let Some(tab_idx) = tab_index_at(pos, self.tabs.len()) {
+                    self.open_tab_context_menu(tab_idx, pos);
+                    return Ok(());
+                }
+            }
+            self.tab_menu = None;
+        }
+
         if is_mouse_button_pressed(MouseButton::Left) {
             let (x, y) = mouse_position();
             let pos = vec2(x, y);
             if y < TAB_BAR_HEIGHT {
                 if let Some(tab_idx) = tab_index_at(pos, self.tabs.len()) {
-                    if tab_idx == self.active_tab {
-                        if !self.is_renaming() {
-                            self.begin_rename_active_tab();
-                        }
-                    } else {
+                    self.tab_menu = None;
+                    if tab_idx != self.active_tab {
                         self.active_tab = tab_idx;
                         self.input_mode = InputMode::Terminal;
                         self.mark_session_dirty();
@@ -1523,6 +1610,49 @@ impl AppState {
             }
         }
 
+        Ok(())
+    }
+
+    fn handle_tab_context_menu_mouse(&mut self) -> Result<bool> {
+        let Some(menu) = self.tab_menu else {
+            return Ok(false);
+        };
+
+        if is_mouse_button_pressed(MouseButton::Right) {
+            let (x, y) = mouse_position();
+            let pos = vec2(x, y);
+            if y < TAB_BAR_HEIGHT {
+                if let Some(tab_idx) = tab_index_at(pos, self.tabs.len()) {
+                    self.open_tab_context_menu(tab_idx, pos);
+                    return Ok(true);
+                }
+            }
+            self.tab_menu = None;
+            return Ok(true);
+        }
+
+        if !is_mouse_button_pressed(MouseButton::Left) {
+            return Ok(false);
+        }
+
+        let (x, y) = mouse_position();
+        let pos = vec2(x, y);
+        let rect = tab_context_menu_rect(menu);
+        if let Some(action) = tab_menu_action_at(rect, pos) {
+            self.run_tab_menu_action(menu.tab_index, action)?;
+            self.tab_menu = None;
+            return Ok(true);
+        }
+
+        self.tab_menu = None;
+        Ok(rect_contains(rect, pos))
+    }
+
+    fn run_tab_menu_action(&mut self, tab_idx: usize, action: TabMenuAction) -> Result<()> {
+        match action {
+            TabMenuAction::Rename => self.begin_rename_tab(tab_idx),
+            TabMenuAction::Theme(theme_index) => self.set_tab_theme(tab_idx, theme_index)?,
+        }
         Ok(())
     }
 
@@ -1601,6 +1731,7 @@ impl AppState {
         }
 
         draw_rename_overlay(self, fonts);
+        draw_tab_context_menu(self, fonts);
         draw_keybindings_overlay(self, fonts);
         Ok(())
     }
@@ -2277,7 +2408,7 @@ fn draw_tab_bar(app: &AppState, fonts: &TerminalFonts) {
         }
 
         let running_agent = tab.has_running_agent();
-        let label = format!("{}  {}", tab.title, tab.panes.len());
+        let label = tab_label(&tab.title);
         let label_x = rect.x + if running_agent { 34.0 } else { 12.0 };
         set_scissor(Some(rect));
         if running_agent {
@@ -2293,7 +2424,7 @@ fn draw_tab_bar(app: &AppState, fonts: &TerminalFonts) {
             );
         }
         draw_text_ex(
-            &label,
+            label,
             label_x,
             rect.y + 22.0,
             TextParams {
@@ -2322,6 +2453,215 @@ fn draw_tab_bar(app: &AppState, fonts: &TerminalFonts) {
             color: theme.accent.color(),
             ..Default::default()
         },
+    );
+}
+
+fn tab_label(title: &str) -> &str {
+    title
+}
+
+fn tab_menu_item_count() -> usize {
+    1 + THEMES.len()
+}
+
+fn tab_menu_height() -> f32 {
+    TAB_MENU_PADDING * 2.0
+        + TAB_MENU_ROW_HEIGHT * tab_menu_item_count() as f32
+        + TAB_MENU_SEPARATOR_HEIGHT
+}
+
+fn tab_context_menu_rect(menu: TabContextMenu) -> Rect {
+    let height = tab_menu_height();
+    let min_x = 6.0;
+    let min_y = TAB_BAR_HEIGHT + 2.0;
+    let max_x = (screen_width() - TAB_MENU_WIDTH - 6.0).max(min_x);
+    let max_y = (screen_height() - height - 6.0).max(min_y);
+    Rect::new(
+        menu.pos.x.clamp(min_x, max_x),
+        menu.pos.y.max(min_y).min(max_y),
+        TAB_MENU_WIDTH,
+        height,
+    )
+}
+
+fn tab_menu_item_rect(menu_rect: Rect, index: usize) -> Rect {
+    let separator_offset = if index > 0 {
+        TAB_MENU_SEPARATOR_HEIGHT
+    } else {
+        0.0
+    };
+    Rect::new(
+        menu_rect.x + TAB_MENU_PADDING,
+        menu_rect.y + TAB_MENU_PADDING + index as f32 * TAB_MENU_ROW_HEIGHT + separator_offset,
+        menu_rect.w - TAB_MENU_PADDING * 2.0,
+        TAB_MENU_ROW_HEIGHT,
+    )
+}
+
+fn tab_menu_action_for_index(index: usize) -> Option<TabMenuAction> {
+    if index == 0 {
+        return Some(TabMenuAction::Rename);
+    }
+    let theme_index = index - 1;
+    (theme_index < THEMES.len()).then_some(TabMenuAction::Theme(theme_index))
+}
+
+fn tab_menu_action_at(menu_rect: Rect, pos: Vec2) -> Option<TabMenuAction> {
+    (0..tab_menu_item_count())
+        .find(|idx| rect_contains(tab_menu_item_rect(menu_rect, *idx), pos))
+        .and_then(tab_menu_action_for_index)
+}
+
+fn draw_tab_context_menu(app: &AppState, fonts: &TerminalFonts) {
+    let Some(menu) = app.tab_menu else {
+        return;
+    };
+    let Some(tab) = app.tabs.get(menu.tab_index) else {
+        return;
+    };
+
+    let theme = app.active_tab().theme();
+    let rect = tab_context_menu_rect(menu);
+    let mouse = vec2(mouse_position().0, mouse_position().1);
+    draw_menu_shadow(rect);
+    draw_rounded_rect(rect, TAB_MENU_RADIUS, Color::from_rgba(255, 255, 255, 34));
+    draw_rounded_rect(
+        Rect::new(rect.x + 1.0, rect.y + 1.0, rect.w - 2.0, rect.h - 2.0),
+        TAB_MENU_RADIUS - 1.0,
+        Color::from_rgba(46, 46, 48, 244),
+    );
+
+    let separator_y = tab_menu_item_rect(rect, 0).y + TAB_MENU_ROW_HEIGHT + 3.0;
+    draw_rectangle(
+        rect.x + 11.0,
+        separator_y,
+        rect.w - 22.0,
+        1.0,
+        Color::from_rgba(255, 255, 255, 25),
+    );
+
+    for idx in 0..tab_menu_item_count() {
+        let row = tab_menu_item_rect(rect, idx);
+        let hovered = rect_contains(row, mouse);
+        let action = tab_menu_action_for_index(idx);
+        let selected_theme =
+            matches!(action, Some(TabMenuAction::Theme(theme_idx)) if theme_idx == tab.theme_index);
+        if hovered {
+            draw_rounded_rect(
+                Rect::new(row.x + 2.0, row.y + 1.0, row.w - 4.0, row.h - 2.0),
+                5.0,
+                Color::from_rgba(0, 122, 255, 230),
+            );
+        }
+
+        match action {
+            Some(TabMenuAction::Rename) => {
+                draw_text_ex(
+                    "Rename",
+                    row.x + 25.0,
+                    row.y + 18.0,
+                    TextParams {
+                        font: fonts.metrics_font(),
+                        font_size: 13,
+                        color: menu_text_color(hovered),
+                        ..Default::default()
+                    },
+                );
+            }
+            Some(TabMenuAction::Theme(theme_index)) => {
+                let option = THEMES[theme_index];
+                if selected_theme {
+                    draw_checkmark(
+                        vec2(row.x + 12.0, row.y + 9.0),
+                        if hovered {
+                            Color::from_rgba(255, 255, 255, 245)
+                        } else {
+                            theme.accent.color()
+                        },
+                    );
+                }
+                draw_rounded_rect(
+                    Rect::new(row.x + 29.0, row.y + 8.0, 10.0, 10.0),
+                    2.0,
+                    option.accent.color(),
+                );
+                draw_text_ex(
+                    option.name,
+                    row.x + 50.0,
+                    row.y + 18.0,
+                    TextParams {
+                        font: fonts.metrics_font(),
+                        font_size: 13,
+                        color: menu_text_color(hovered),
+                        ..Default::default()
+                    },
+                );
+            }
+            None => {}
+        }
+    }
+}
+
+fn menu_text_color(hovered: bool) -> Color {
+    if hovered {
+        Color::from_rgba(255, 255, 255, 250)
+    } else {
+        Color::from_rgba(232, 232, 234, 245)
+    }
+}
+
+fn draw_menu_shadow(rect: Rect) {
+    for idx in 0..4 {
+        let spread = idx as f32 * 1.5;
+        draw_rounded_rect(
+            Rect::new(
+                rect.x - spread * 0.5,
+                rect.y + 3.0 + spread,
+                rect.w + spread,
+                rect.h + spread,
+            ),
+            TAB_MENU_RADIUS + spread * 0.4,
+            Color::from_rgba(0, 0, 0, 32u8.saturating_sub(idx as u8 * 6)),
+        );
+    }
+}
+
+fn draw_rounded_rect(rect: Rect, radius: f32, color: Color) {
+    let radius = radius.min(rect.w * 0.5).min(rect.h * 0.5).max(0.0);
+    draw_rectangle(
+        rect.x + radius,
+        rect.y,
+        rect.w - radius * 2.0,
+        rect.h,
+        color,
+    );
+    draw_rectangle(
+        rect.x,
+        rect.y + radius,
+        rect.w,
+        rect.h - radius * 2.0,
+        color,
+    );
+    draw_circle(rect.x + radius, rect.y + radius, radius, color);
+    draw_circle(rect.x + rect.w - radius, rect.y + radius, radius, color);
+    draw_circle(rect.x + radius, rect.y + rect.h - radius, radius, color);
+    draw_circle(
+        rect.x + rect.w - radius,
+        rect.y + rect.h - radius,
+        radius,
+        color,
+    );
+}
+
+fn draw_checkmark(pos: Vec2, color: Color) {
+    draw_line(pos.x, pos.y + 5.0, pos.x + 3.0, pos.y + 8.0, 1.5, color);
+    draw_line(
+        pos.x + 3.0,
+        pos.y + 8.0,
+        pos.x + 9.0,
+        pos.y + 1.0,
+        1.5,
+        color,
     );
 }
 
@@ -4375,20 +4715,21 @@ mod tests {
 
     use macroquad::{
         miniquad::{EventHandler, KeyMods},
-        prelude::{KeyCode, WHITE},
+        prelude::{KeyCode, Rect, WHITE, vec2},
     };
 
     use super::{
         AgentKind, AgentScreenState, AgentStatusFileMonitor, AppCommand, AppConfig, CellView,
         CursorMotion, CursorTrailRect, CursorView, CursorVisualStyle, InputContext, KeyChord,
         OUTPUT_SCROLL_ANIMATION_FAR_LINES, PaneId, PaneLayout, ScrollbarView, SessionPaneState,
-        SessionState, SessionTabState, SplitAxis, StoredPaneLayout, StoredSplitAxis, TerminalInput,
-        TextEdit, TextInputEvent, animation_alpha, app_command_for_key, applescript_string,
-        binding_for_command, bounded_scroll_rows, classify_agent_screen, configured_keybindings,
-        cursor_animation_length, cursor_trail_rect, default_keybindings, detect_output_scroll_rows,
-        detect_upward_row_shift, format_binding, keybinding, parse_file_uri_path, parse_key_chord,
-        percent_decode_utf8, read_agent_status, resolve_keybinding, session_title_number,
-        should_show_agent_spinner,
+        SessionState, SessionTabState, SplitAxis, StoredPaneLayout, StoredSplitAxis, THEMES,
+        TabMenuAction, TerminalInput, TextEdit, TextInputEvent, animation_alpha,
+        app_command_for_key, applescript_string, binding_for_command, bounded_scroll_rows,
+        classify_agent_screen, configured_keybindings, cursor_animation_length, cursor_trail_rect,
+        default_keybindings, detect_output_scroll_rows, detect_upward_row_shift, format_binding,
+        keybinding, parse_file_uri_path, parse_key_chord, percent_decode_utf8, read_agent_status,
+        resolve_keybinding, session_title_number, should_show_agent_spinner, tab_label,
+        tab_menu_action_at, tab_menu_item_rect,
     };
 
     fn scrollbar(top: u64, visible: u64, total: u64) -> ScrollbarView {
@@ -4426,6 +4767,33 @@ mod tests {
     fn bounded_scroll_rows_stops_at_edges() {
         assert_eq!(bounded_scroll_rows(-3, Some(scrollbar(0, 10, 100))), 0);
         assert_eq!(bounded_scroll_rows(3, Some(scrollbar(90, 10, 100))), 0);
+    }
+
+    #[test]
+    fn tab_label_omits_pane_count() {
+        assert_eq!(tab_label("session 1"), "session 1");
+    }
+
+    #[test]
+    fn tab_context_menu_hit_tests_actions() {
+        let menu = Rect::new(20.0, 40.0, 176.0, 192.0);
+        let rename = tab_menu_item_rect(menu, 0);
+        let first_theme = tab_menu_item_rect(menu, 1);
+        let last_theme = tab_menu_item_rect(menu, THEMES.len());
+
+        assert_eq!(
+            tab_menu_action_at(menu, vec2(rename.x + 4.0, rename.y + 4.0)),
+            Some(TabMenuAction::Rename)
+        );
+        assert_eq!(
+            tab_menu_action_at(menu, vec2(first_theme.x + 4.0, first_theme.y + 4.0)),
+            Some(TabMenuAction::Theme(0))
+        );
+        assert_eq!(
+            tab_menu_action_at(menu, vec2(last_theme.x + 4.0, last_theme.y + 4.0)),
+            Some(TabMenuAction::Theme(THEMES.len() - 1))
+        );
+        assert_eq!(tab_menu_action_at(menu, vec2(0.0, 0.0)), None);
     }
 
     #[test]
