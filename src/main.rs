@@ -2182,66 +2182,86 @@ fn draw_tab_bar(app: &AppState, fonts: &TerminalFonts) {
 
     let count = app.tabs.len();
     for (idx, tab) in app.tabs.iter().enumerate() {
-        let rect = tab_rect(idx, count);
-        let selected = idx == app.active_tab;
-        let bg = if selected {
-            theme.background.color()
-        } else {
-            theme.inactive.alpha(190)
-        };
-        draw_rectangle(rect.x, rect.y, rect.w - 1.0, rect.h, bg);
-        if selected {
-            draw_rectangle(
-                rect.x,
-                rect.y + rect.h - 3.0,
-                rect.w - 1.0,
-                3.0,
-                theme.accent.color(),
-            );
-        }
-
-        let running_agent = tab.has_running_agent();
-        let label = tab_label(&tab.title);
-        let label_x = rect.x + if running_agent { 34.0 } else { 12.0 };
-        set_scissor(Some(rect));
-        if running_agent {
-            draw_loading_spinner(
-                vec2(rect.x + 18.0, rect.y + 16.0),
-                5.2,
-                get_time() as f32 * 5.2,
-                if selected {
-                    theme.accent.color()
-                } else {
-                    Color::from_rgba(170, 198, 220, 255)
-                },
-            );
-        }
-        draw_text_ex(
-            label,
-            label_x,
-            rect.y + 22.0,
-            TextParams {
-                font: tab_font,
-                font_size: 15,
-                color: if selected {
-                    theme.foreground.color()
-                } else {
-                    Color::from_rgba(190, 194, 202, 255)
-                },
-                ..Default::default()
-            },
+        draw_tab_bar_item(
+            tab,
+            tab_rect(idx, count),
+            idx == app.active_tab,
+            theme,
+            tab_font,
         );
-        set_scissor(None);
     }
 
-    let name = theme.name;
-    let measured = measure_text(name, tab_font, 14, 1.0);
+    draw_tab_bar_theme_label(theme, tab_font);
+}
+
+fn draw_tab_bar_item(
+    tab: &TerminalTab,
+    rect: Rect,
+    selected: bool,
+    theme: TerminalTheme,
+    font: Option<&Font>,
+) {
+    let bg = if selected {
+        theme.background.color()
+    } else {
+        theme.inactive.alpha(190)
+    };
+    draw_rectangle(rect.x, rect.y, rect.w - 1.0, rect.h, bg);
+    if selected {
+        draw_rectangle(
+            rect.x,
+            rect.y + rect.h - 3.0,
+            rect.w - 1.0,
+            3.0,
+            theme.accent.color(),
+        );
+    }
+
+    let running_agent = tab.has_running_agent();
+    let label_x = rect.x + if running_agent { 34.0 } else { 12.0 };
+    set_scissor(Some(rect));
+    if running_agent {
+        draw_tab_agent_spinner(rect, selected, theme);
+    }
     draw_text_ex(
-        name,
+        tab_label(&tab.title),
+        label_x,
+        rect.y + 22.0,
+        TextParams {
+            font,
+            font_size: 15,
+            color: if selected {
+                theme.foreground.color()
+            } else {
+                Color::from_rgba(190, 194, 202, 255)
+            },
+            ..Default::default()
+        },
+    );
+    set_scissor(None);
+}
+
+fn draw_tab_agent_spinner(rect: Rect, selected: bool, theme: TerminalTheme) {
+    draw_loading_spinner(
+        vec2(rect.x + 18.0, rect.y + 16.0),
+        5.2,
+        get_time() as f32 * 5.2,
+        if selected {
+            theme.accent.color()
+        } else {
+            Color::from_rgba(170, 198, 220, 255)
+        },
+    );
+}
+
+fn draw_tab_bar_theme_label(theme: TerminalTheme, font: Option<&Font>) {
+    let measured = measure_text(theme.name, font, 14, 1.0);
+    draw_text_ex(
+        theme.name,
         screen_width() - measured.width - 14.0,
         22.0,
         TextParams {
-            font: tab_font,
+            font,
             font_size: 14,
             color: theme.accent.color(),
             ..Default::default()
@@ -2316,6 +2336,19 @@ fn draw_tab_context_menu(app: &AppState, fonts: &TerminalFonts) {
     let theme = app.active_tab().theme();
     let rect = tab_context_menu_rect(menu);
     let mouse = vec2(mouse_position().0, mouse_position().1);
+    draw_tab_context_menu_background(rect);
+
+    for idx in 0..tab_menu_item_count() {
+        let row = tab_menu_item_rect(rect, idx);
+        let hovered = rect_contains(row, mouse);
+        let action = tab_menu_action_for_index(idx);
+        let selected_theme =
+            matches!(action, Some(TabMenuAction::Theme(theme_idx)) if theme_idx == tab.theme_index);
+        draw_tab_context_menu_row(row, action, selected_theme, hovered, theme, fonts);
+    }
+}
+
+fn draw_tab_context_menu_background(rect: Rect) {
     draw_menu_shadow(rect);
     draw_rounded_rect(rect, TAB_MENU_RADIUS, Color::from_rgba(255, 255, 255, 34));
     draw_rounded_rect(
@@ -2332,67 +2365,75 @@ fn draw_tab_context_menu(app: &AppState, fonts: &TerminalFonts) {
         1.0,
         Color::from_rgba(255, 255, 255, 25),
     );
+}
 
-    for idx in 0..tab_menu_item_count() {
-        let row = tab_menu_item_rect(rect, idx);
-        let hovered = rect_contains(row, mouse);
-        let action = tab_menu_action_for_index(idx);
-        let selected_theme =
-            matches!(action, Some(TabMenuAction::Theme(theme_idx)) if theme_idx == tab.theme_index);
-        if hovered {
-            draw_rounded_rect(
-                Rect::new(row.x + 2.0, row.y + 1.0, row.w - 4.0, row.h - 2.0),
-                5.0,
-                Color::from_rgba(0, 122, 255, 230),
-            );
-        }
-
-        match action {
-            Some(TabMenuAction::Rename) => {
-                draw_text_ex(
-                    "Rename",
-                    row.x + 25.0,
-                    row.y + 18.0,
-                    TextParams {
-                        font: fonts.metrics_font(),
-                        font_size: 13,
-                        color: menu_text_color(hovered),
-                        ..Default::default()
-                    },
-                );
-            }
-            Some(TabMenuAction::Theme(theme_index)) => {
-                let option = THEMES[theme_index];
-                if selected_theme {
-                    draw_checkmark(
-                        vec2(row.x + 12.0, row.y + 9.0),
-                        if hovered {
-                            Color::from_rgba(255, 255, 255, 245)
-                        } else {
-                            theme.accent.color()
-                        },
-                    );
-                }
-                draw_rounded_rect(
-                    Rect::new(row.x + 29.0, row.y + 8.0, 10.0, 10.0),
-                    2.0,
-                    option.accent.color(),
-                );
-                draw_text_ex(
-                    option.name,
-                    row.x + 50.0,
-                    row.y + 18.0,
-                    TextParams {
-                        font: fonts.metrics_font(),
-                        font_size: 13,
-                        color: menu_text_color(hovered),
-                        ..Default::default()
-                    },
-                );
-            }
-            None => {}
-        }
+fn draw_tab_context_menu_row(
+    row: Rect,
+    action: Option<TabMenuAction>,
+    selected_theme: bool,
+    hovered: bool,
+    theme: TerminalTheme,
+    fonts: &TerminalFonts,
+) {
+    if hovered {
+        draw_rounded_rect(
+            Rect::new(row.x + 2.0, row.y + 1.0, row.w - 4.0, row.h - 2.0),
+            5.0,
+            Color::from_rgba(0, 122, 255, 230),
+        );
     }
+
+    match action {
+        Some(TabMenuAction::Rename) => draw_tab_menu_rename_row(row, hovered, fonts),
+        Some(TabMenuAction::Theme(theme_index)) => {
+            let option = THEMES[theme_index];
+            if selected_theme {
+                draw_checkmark(
+                    vec2(row.x + 12.0, row.y + 9.0),
+                    if hovered {
+                        Color::from_rgba(255, 255, 255, 245)
+                    } else {
+                        theme.accent.color()
+                    },
+                );
+            }
+            draw_tab_menu_theme_row(row, option, hovered, fonts);
+        }
+        None => {}
+    }
+}
+
+fn draw_tab_menu_rename_row(row: Rect, hovered: bool, fonts: &TerminalFonts) {
+    draw_text_ex(
+        "Rename",
+        row.x + 25.0,
+        row.y + 18.0,
+        TextParams {
+            font: fonts.metrics_font(),
+            font_size: 13,
+            color: menu_text_color(hovered),
+            ..Default::default()
+        },
+    );
+}
+
+fn draw_tab_menu_theme_row(row: Rect, option: TerminalTheme, hovered: bool, fonts: &TerminalFonts) {
+    draw_rounded_rect(
+        Rect::new(row.x + 29.0, row.y + 8.0, 10.0, 10.0),
+        2.0,
+        option.accent.color(),
+    );
+    draw_text_ex(
+        option.name,
+        row.x + 50.0,
+        row.y + 18.0,
+        TextParams {
+            font: fonts.metrics_font(),
+            font_size: 13,
+            color: menu_text_color(hovered),
+            ..Default::default()
+        },
+    );
 }
 
 fn menu_text_color(hovered: bool) -> Color {
@@ -2552,6 +2593,22 @@ fn draw_keybindings_overlay(app: &AppState, fonts: &TerminalFonts) {
 
     let theme = app.active_tab().theme();
     let panel = keybindings_panel_rect();
+    draw_keybindings_panel(panel, theme);
+    draw_keybindings_header(panel, capture, theme, fonts);
+
+    for (idx, spec) in COMMAND_SPECS.iter().enumerate() {
+        draw_keybinding_row(
+            app,
+            *spec,
+            keybinding_row_rect(panel, idx),
+            capture,
+            theme,
+            fonts,
+        );
+    }
+}
+
+fn draw_keybindings_panel(panel: Rect, theme: TerminalTheme) {
     draw_rectangle(
         0.0,
         0.0,
@@ -2575,7 +2632,14 @@ fn draw_keybindings_overlay(app: &AppState, fonts: &TerminalFonts) {
         1.0,
         theme.accent.alpha(120),
     );
+}
 
+fn draw_keybindings_header(
+    panel: Rect,
+    capture: Option<AppCommand>,
+    theme: TerminalTheme,
+    fonts: &TerminalFonts,
+) {
     draw_text_ex(
         "Keybindings",
         panel.x + 24.0,
@@ -2604,86 +2668,110 @@ fn draw_keybindings_overlay(app: &AppState, fonts: &TerminalFonts) {
             ..Default::default()
         },
     );
+}
 
-    for (idx, spec) in COMMAND_SPECS.iter().enumerate() {
-        let row = keybinding_row_rect(panel, idx);
-        let selected = capture == Some(spec.command);
-        let hovered = rect_contains(row, vec2(mouse_position().0, mouse_position().1));
-        let row_bg = if selected {
-            theme.accent.alpha(54)
-        } else if hovered {
-            theme.inactive.alpha(150)
-        } else {
-            ThemeRgb::new(0x1b, 0x1f, 0x27).alpha(170)
-        };
-        draw_rectangle(row.x, row.y, row.w, row.h, row_bg);
-        if selected {
-            draw_rectangle(row.x, row.y, 3.0, row.h, theme.accent.color());
-        }
-
-        draw_text_ex(
-            spec.title,
-            row.x + 14.0,
-            row.y + 17.0,
-            TextParams {
-                font: fonts.metrics_font(),
-                font_size: 15,
-                color: theme.foreground.color(),
-                ..Default::default()
-            },
-        );
-        draw_text_ex(
-            spec.detail,
-            row.x + 14.0,
-            row.y + 32.0,
-            TextParams {
-                font: fonts.metrics_font(),
-                font_size: 11,
-                color: Color::from_rgba(150, 158, 170, 255),
-                ..Default::default()
-            },
-        );
-
-        let binding = if selected {
-            "recording...".to_owned()
-        } else {
-            format_binding(binding_for_command(&app.keybindings, spec.command))
-        };
-        let chip_width = measure_text(&binding, fonts.metrics_font(), 14, 1.0).width + 28.0;
-        let chip = Rect::new(
-            row.x + row.w - chip_width - 10.0,
-            row.y + 7.0,
-            chip_width,
-            24.0,
-        );
-        draw_rectangle(
-            chip.x,
-            chip.y,
-            chip.w,
-            chip.h,
-            if selected {
-                theme.accent.alpha(120)
-            } else {
-                ThemeRgb::new(0x0b, 0x0d, 0x11).alpha(220)
-            },
-        );
-        draw_rectangle_lines(chip.x, chip.y, chip.w, chip.h, 1.0, theme.accent.alpha(110));
-        draw_text_ex(
-            &binding,
-            chip.x + 14.0,
-            chip.y + 17.0,
-            TextParams {
-                font: fonts.metrics_font(),
-                font_size: 14,
-                color: if selected {
-                    theme.foreground.color()
-                } else {
-                    theme.accent.color()
-                },
-                ..Default::default()
-            },
-        );
+fn draw_keybinding_row(
+    app: &AppState,
+    spec: CommandSpec,
+    row: Rect,
+    capture: Option<AppCommand>,
+    theme: TerminalTheme,
+    fonts: &TerminalFonts,
+) {
+    let selected = capture == Some(spec.command);
+    let hovered = rect_contains(row, vec2(mouse_position().0, mouse_position().1));
+    let row_bg = if selected {
+        theme.accent.alpha(54)
+    } else if hovered {
+        theme.inactive.alpha(150)
+    } else {
+        ThemeRgb::new(0x1b, 0x1f, 0x27).alpha(170)
+    };
+    draw_rectangle(row.x, row.y, row.w, row.h, row_bg);
+    if selected {
+        draw_rectangle(row.x, row.y, 3.0, row.h, theme.accent.color());
     }
+
+    draw_keybinding_row_text(spec, row, theme, fonts);
+    let binding = if selected {
+        "recording...".to_owned()
+    } else {
+        format_binding(binding_for_command(&app.keybindings, spec.command))
+    };
+    draw_keybinding_chip(&binding, row, selected, theme, fonts);
+}
+
+fn draw_keybinding_row_text(
+    spec: CommandSpec,
+    row: Rect,
+    theme: TerminalTheme,
+    fonts: &TerminalFonts,
+) {
+    draw_text_ex(
+        spec.title,
+        row.x + 14.0,
+        row.y + 17.0,
+        TextParams {
+            font: fonts.metrics_font(),
+            font_size: 15,
+            color: theme.foreground.color(),
+            ..Default::default()
+        },
+    );
+    draw_text_ex(
+        spec.detail,
+        row.x + 14.0,
+        row.y + 32.0,
+        TextParams {
+            font: fonts.metrics_font(),
+            font_size: 11,
+            color: Color::from_rgba(150, 158, 170, 255),
+            ..Default::default()
+        },
+    );
+}
+
+fn draw_keybinding_chip(
+    binding: &str,
+    row: Rect,
+    selected: bool,
+    theme: TerminalTheme,
+    fonts: &TerminalFonts,
+) {
+    let chip_width = measure_text(binding, fonts.metrics_font(), 14, 1.0).width + 28.0;
+    let chip = Rect::new(
+        row.x + row.w - chip_width - 10.0,
+        row.y + 7.0,
+        chip_width,
+        24.0,
+    );
+    draw_rectangle(
+        chip.x,
+        chip.y,
+        chip.w,
+        chip.h,
+        if selected {
+            theme.accent.alpha(120)
+        } else {
+            ThemeRgb::new(0x0b, 0x0d, 0x11).alpha(220)
+        },
+    );
+    draw_rectangle_lines(chip.x, chip.y, chip.w, chip.h, 1.0, theme.accent.alpha(110));
+    draw_text_ex(
+        binding,
+        chip.x + 14.0,
+        chip.y + 17.0,
+        TextParams {
+            font: fonts.metrics_font(),
+            font_size: 14,
+            color: if selected {
+                theme.foreground.color()
+            } else {
+                theme.accent.color()
+            },
+            ..Default::default()
+        },
+    );
 }
 
 fn set_scissor(rect: Option<Rect>) {
@@ -3052,81 +3140,74 @@ impl TerminalInput {
 
         false
     }
-}
 
-impl EventHandler for TerminalInput {
-    fn update(&mut self) {}
-
-    fn draw(&mut self) {}
-
-    fn key_down_event(&mut self, keycode: KeyCode, keymods: KeyMods, _repeat: bool) {
-        if self.context == InputContext::KeybindingCapture {
-            if keycode == KeyCode::Escape {
-                self.binding_capture_cancelled = true;
-            } else if !is_modifier_key(keycode) {
-                self.captured_chord = Some(KeyChord::new(keycode, keymods));
-            }
-            return;
+    fn handle_keybinding_capture_key(&mut self, keycode: KeyCode, keymods: KeyMods) -> bool {
+        if self.context != InputContext::KeybindingCapture {
+            return false;
         }
-
-        if self.context == InputContext::Keybindings {
-            if keycode == KeyCode::Escape {
-                self.push_command(AppCommand::DismissOverlay);
-                return;
-            }
-
-            if let Some(command) = resolve_keybinding(&self.keybindings, keycode, keymods) {
-                self.push_command(command);
-            }
-            return;
+        if keycode == KeyCode::Escape {
+            self.binding_capture_cancelled = true;
+        } else if !is_modifier_key(keycode) {
+            self.captured_chord = Some(KeyChord::new(keycode, keymods));
         }
+        true
+    }
 
+    fn handle_keybindings_overlay_key(&mut self, keycode: KeyCode, keymods: KeyMods) -> bool {
+        if self.context != InputContext::Keybindings {
+            return false;
+        }
+        if keycode == KeyCode::Escape {
+            self.push_command(AppCommand::DismissOverlay);
+            return true;
+        }
         if let Some(command) = resolve_keybinding(&self.keybindings, keycode, keymods) {
             self.push_command(command);
-            if command == AppCommand::RenameSession {
-                self.context = InputContext::Rename;
-            }
-            if command == AppCommand::ShowKeybindings {
-                self.context = InputContext::Keybindings;
-            }
-            return;
         }
+        true
+    }
 
-        if self.context == InputContext::Rename {
-            match keycode {
-                KeyCode::Enter | KeyCode::KpEnter => self.push_text_edit(TextEdit::Commit),
-                KeyCode::Escape => self.push_text_edit(TextEdit::Cancel),
-                KeyCode::Backspace => self.push_text_edit(TextEdit::Backspace),
-                _ => {}
-            }
-            return;
+    fn handle_app_command_key(&mut self, keycode: KeyCode, keymods: KeyMods) -> bool {
+        let Some(command) = resolve_keybinding(&self.keybindings, keycode, keymods) else {
+            return false;
+        };
+        self.push_command(command);
+        if command == AppCommand::RenameSession {
+            self.context = InputContext::Rename;
         }
+        if command == AppCommand::ShowKeybindings {
+            self.context = InputContext::Keybindings;
+        }
+        true
+    }
 
+    fn handle_rename_key(&mut self, keycode: KeyCode) -> bool {
+        if self.context != InputContext::Rename {
+            return false;
+        }
+        match keycode {
+            KeyCode::Enter | KeyCode::KpEnter => self.push_text_edit(TextEdit::Commit),
+            KeyCode::Escape => self.push_text_edit(TextEdit::Cancel),
+            KeyCode::Backspace => self.push_text_edit(TextEdit::Backspace),
+            _ => {}
+        }
+        true
+    }
+
+    fn handle_terminal_control_key(&mut self, keycode: KeyCode, keymods: KeyMods) -> bool {
         if keycode == KeyCode::Tab {
             self.push_bytes("tab", b"\t");
             self.skip_char('\t');
-            return;
+            return true;
         }
-
         if keymods.ctrl || keymods.logo {
-            return;
+            return true;
         }
 
         match keycode {
-            KeyCode::Enter | KeyCode::KpEnter => {
-                self.push_bytes("enter", b"\r");
-                self.skip_char('\r');
-                self.skip_char('\n');
-            }
-            KeyCode::Backspace => {
-                self.push_bytes("backspace", b"\x7f");
-                self.skip_char('\u{8}');
-                self.skip_char('\u{7f}');
-            }
-            KeyCode::Escape => {
-                self.push_bytes("escape", b"\x1b");
-                self.skip_char('\u{1b}');
-            }
+            KeyCode::Enter | KeyCode::KpEnter => self.push_enter_key(),
+            KeyCode::Backspace => self.push_backspace_key(),
+            KeyCode::Escape => self.push_escape_key(),
             KeyCode::Up => self.push_bytes("up", b"\x1b[A"),
             KeyCode::Down => self.push_bytes("down", b"\x1b[B"),
             KeyCode::Right => self.push_bytes("right", b"\x1b[C"),
@@ -3136,8 +3217,43 @@ impl EventHandler for TerminalInput {
             KeyCode::Delete => self.push_bytes("delete", b"\x1b[3~"),
             KeyCode::PageUp => self.push_bytes("page-up", b"\x1b[5~"),
             KeyCode::PageDown => self.push_bytes("page-down", b"\x1b[6~"),
-            _ => {}
+            _ => return false,
         }
+        true
+    }
+
+    fn push_enter_key(&mut self) {
+        self.push_bytes("enter", b"\r");
+        self.skip_char('\r');
+        self.skip_char('\n');
+    }
+
+    fn push_backspace_key(&mut self) {
+        self.push_bytes("backspace", b"\x7f");
+        self.skip_char('\u{8}');
+        self.skip_char('\u{7f}');
+    }
+
+    fn push_escape_key(&mut self) {
+        self.push_bytes("escape", b"\x1b");
+        self.skip_char('\u{1b}');
+    }
+}
+
+impl EventHandler for TerminalInput {
+    fn update(&mut self) {}
+
+    fn draw(&mut self) {}
+
+    fn key_down_event(&mut self, keycode: KeyCode, keymods: KeyMods, _repeat: bool) {
+        if self.handle_keybinding_capture_key(keycode, keymods)
+            || self.handle_keybindings_overlay_key(keycode, keymods)
+            || self.handle_app_command_key(keycode, keymods)
+            || self.handle_rename_key(keycode)
+        {
+            return;
+        }
+        self.handle_terminal_control_key(keycode, keymods);
     }
 
     fn char_event(&mut self, character: char, keymods: KeyMods, _repeat: bool) {

@@ -31,6 +31,7 @@ just             # list recipes
 just terminal    # launch the terminal prototype
 just native-spike # build and run the AppKit/Metal spike
 just kitty-smoke # emit a tiny Kitty protocol PNG
+just kitty-render-smoke # screenshot smoke test for Kitty PNG rendering
 just adr         # list Architecture Decision Records
 just adr-new     # create a new ADR
 just check       # cargo check
@@ -52,6 +53,8 @@ core, Metal renderer, and Kitty graphics protocol support.
 The Rust lint gate is intentionally strict: `just verify` runs
 `cargo clippy --all-targets --all-features -- -D warnings`. New code should
 either satisfy the lint or have a narrow, explicit reason for an allow.
+Function bodies are capped at 70 lines via Clippy, and Rust formatting is capped
+at 100 columns via `rustfmt.toml`.
 
 Git pre-commit hooks live in [`.githooks`](.githooks). Run `just install-hooks`
 once per clone to make Git use them. The pre-commit hook runs `just precommit`,

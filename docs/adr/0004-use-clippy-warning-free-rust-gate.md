@@ -33,8 +33,13 @@ Cargo lint settings deny:
 - `unused_must_use`
 - `clippy::dbg_macro`
 - `clippy::todo`
+- `clippy::too_many_lines`
 - `clippy::unimplemented`
 - `clippy::undocumented_unsafe_blocks`
+
+`clippy.toml` sets `too-many-lines-threshold = 70`.
+
+`rustfmt.toml` sets `max_width = 100`.
 
 ## Consequences
 

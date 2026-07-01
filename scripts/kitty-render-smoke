@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "kitty-render-smoke currently requires macOS screencapture" >&2
+  exit 77
+fi
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/neovide-tabs-kitty-smoke.XXXXXX")"
+app_pid=""
+
+cleanup() {
+  if [[ -n "$app_pid" ]] && kill -0 "$app_pid" 2>/dev/null; then
+    kill "$app_pid" 2>/dev/null || true
+    wait "$app_pid" 2>/dev/null || true
+  fi
+  if [[ "${KEEP_KITTY_RENDER_SMOKE:-}" != "1" ]]; then
+    rm -rf "$tmpdir"
+  else
+    echo "kept smoke artifacts in $tmpdir" >&2
+  fi
+}
+trap cleanup EXIT
+
+cargo build >/dev/null
+
+cat >"$tmpdir/smoke-shell" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$repo_root"
+./scripts/kitty-image-smoke
+sleep 20
+EOF
+chmod +x "$tmpdir/smoke-shell"
+
+cat >"$tmpdir/config.toml" <<EOF
+[notifications]
+agents = false
+osc = false
+status_files = false
+EOF
+
+NVTERM_SHELL="$tmpdir/smoke-shell" \
+NVTERM_CONFIG="$tmpdir/config.toml" \
+NVTERM_SESSION="$tmpdir/session.toml" \
+XDG_STATE_HOME="$tmpdir/state" \
+"$repo_root/target/debug/neovide-tabs" &
+app_pid=$!
+
+sleep 2
+
+osascript - "$app_pid" <<'APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+  set targetPid to item 1 of argv as integer
+  tell application "System Events"
+    repeat with proc in processes
+      if unix id of proc is targetPid then
+        set frontmost of proc to true
+        exit repeat
+      end if
+    end repeat
+  end tell
+end run
+APPLESCRIPT
+
+sleep 2
+screenshot="$tmpdir/screenshot.png"
+screencapture -x "$screenshot"
+
+python3 - "$screenshot" <<'PY'
+import struct
+import sys
+import zlib
+
+path = sys.argv[1]
+data = open(path, "rb").read()
+
+if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+    raise SystemExit("screenshot is not a PNG")
+
+idx = 8
+width = height = bit_depth = color_type = None
+idat = bytearray()
+while idx < len(data):
+    length = struct.unpack(">I", data[idx : idx + 4])[0]
+    chunk_type = data[idx + 4 : idx + 8]
+    chunk = data[idx + 8 : idx + 8 + length]
+    idx += 12 + length
+
+    if chunk_type == b"IHDR":
+        width, height, bit_depth, color_type = struct.unpack(">IIBB", chunk[:10])
+    elif chunk_type == b"IDAT":
+        idat.extend(chunk)
+    elif chunk_type == b"IEND":
+        break
+
+if bit_depth != 8 or color_type not in (2, 6):
+    raise SystemExit(f"unsupported PNG format bit_depth={bit_depth} color_type={color_type}")
+
+channels = 4 if color_type == 6 else 3
+stride = width * channels
+raw = zlib.decompress(bytes(idat))
+rows = []
+pos = 0
+prev = bytearray(stride)
+
+for _ in range(height):
+    filter_type = raw[pos]
+    pos += 1
+    row = bytearray(raw[pos : pos + stride])
+    pos += stride
+
+    for i in range(stride):
+        left = row[i - channels] if i >= channels else 0
+        up = prev[i]
+        up_left = prev[i - channels] if i >= channels else 0
+
+        if filter_type == 1:
+            row[i] = (row[i] + left) & 0xFF
+        elif filter_type == 2:
+            row[i] = (row[i] + up) & 0xFF
+        elif filter_type == 3:
+            row[i] = (row[i] + ((left + up) // 2)) & 0xFF
+        elif filter_type == 4:
+            p = left + up - up_left
+            pa = abs(p - left)
+            pb = abs(p - up)
+            pc = abs(p - up_left)
+            predictor = left if pa <= pb and pa <= pc else up if pb <= pc else up_left
+            row[i] = (row[i] + predictor) & 0xFF
+        elif filter_type != 0:
+            raise SystemExit(f"unsupported PNG filter {filter_type}")
+
+    rows.append(row)
+    prev = row
+
+def near(pixel, target, tolerance=30):
+    return all(abs(int(pixel[i]) - target[i]) <= tolerance for i in range(3))
+
+yellow = (255, 208, 102)
+blue = (110, 161, 222)
+yellow_mask = bytearray(width * height)
+blue_mask = bytearray(width * height)
+
+for y, row in enumerate(rows):
+    for x in range(width):
+        start = x * channels
+        pixel = row[start : start + 3]
+        offset = y * width + x
+        if near(pixel, yellow):
+            yellow_mask[offset] = 1
+        if near(pixel, blue, tolerance=42):
+            blue_mask[offset] = 1
+
+window_w = min(width, 180)
+window_h = min(height, 140)
+step = 10
+best = (0, 0, 0, 0)
+
+for y in range(0, max(1, height - window_h + 1), step):
+    for x in range(0, max(1, width - window_w + 1), step):
+        y_count = 0
+        b_count = 0
+        for yy in range(y, y + window_h):
+            base = yy * width
+            y_count += sum(yellow_mask[base + x : base + x + window_w])
+            b_count += sum(blue_mask[base + x : base + x + window_w])
+        total = y_count + b_count
+        if total > best[0]:
+            best = (total, y_count, b_count, x, y)
+
+total, y_count, b_count, x, y = best
+if y_count < 300 or b_count < 300 or total < 1200:
+    raise SystemExit(
+        f"Kitty image pixels not detected: total={total} yellow={y_count} blue={b_count} at=({x},{y})"
+    )
+
+print(f"Kitty image pixels detected: total={total} yellow={y_count} blue={b_count} at=({x},{y})")
+PY

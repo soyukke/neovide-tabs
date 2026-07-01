@@ -43,6 +43,10 @@ native-spike:
 kitty-smoke:
     @./scripts/kitty-image-smoke
 
+# Launch the app and verify Kitty PNG rendering from a screenshot.
+kitty-render-smoke:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just kitty-render-smoke; else ./scripts/kitty-render-smoke; fi
+
 # Update the current neovide-tabs pane's agent status.
 agent-status state summary="":
     @./scripts/nvterm-agent-status "{{state}}" "{{summary}}"
