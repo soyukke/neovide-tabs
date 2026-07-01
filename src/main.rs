@@ -741,6 +741,10 @@ impl TerminalPane {
         );
     }
 
+    fn has_running_agent(&self) -> bool {
+        self.agent_status.is_running() || self.agent_monitor.is_busy()
+    }
+
     fn frame(
         &mut self,
         dt: f32,
@@ -949,6 +953,10 @@ impl TerminalTab {
             pane.apply_theme(theme)?;
         }
         Ok(())
+    }
+
+    fn has_running_agent(&self) -> bool {
+        self.panes.iter().any(TerminalPane::has_running_agent)
     }
 }
 
@@ -2264,11 +2272,25 @@ fn draw_tab_bar(app: &AppState, fonts: &TerminalFonts) {
             );
         }
 
+        let running_agent = tab.has_running_agent();
         let label = format!("{}  {}", tab.title, tab.panes.len());
+        let label_x = rect.x + if running_agent { 34.0 } else { 12.0 };
         set_scissor(Some(rect));
+        if running_agent {
+            draw_loading_spinner(
+                vec2(rect.x + 18.0, rect.y + 16.0),
+                5.2,
+                get_time() as f32 * 5.2,
+                if selected {
+                    theme.accent.color()
+                } else {
+                    Color::from_rgba(170, 198, 220, 255)
+                },
+            );
+        }
         draw_text_ex(
             &label,
-            rect.x + 12.0,
+            label_x,
             rect.y + 22.0,
             TextParams {
                 font: tab_font,
@@ -2297,6 +2319,27 @@ fn draw_tab_bar(app: &AppState, fonts: &TerminalFonts) {
             ..Default::default()
         },
     );
+}
+
+fn draw_loading_spinner(center: Vec2, radius: f32, phase: f32, color: Color) {
+    let segments = 8;
+    for idx in 0..segments {
+        let t = idx as f32 / segments as f32;
+        let angle = phase + t * std::f32::consts::TAU;
+        let alpha = 0.20 + t * 0.72;
+        let mut segment_color = color;
+        segment_color.a *= alpha;
+        let inner = radius * 0.48;
+        let outer = radius;
+        draw_line(
+            center.x + angle.cos() * inner,
+            center.y + angle.sin() * inner,
+            center.x + angle.cos() * outer,
+            center.y + angle.sin() * outer,
+            1.8,
+            segment_color,
+        );
+    }
 }
 
 fn draw_rename_overlay(app: &AppState, fonts: &TerminalFonts) {
@@ -3710,6 +3753,10 @@ impl AgentMonitor {
             body: format!("{} {action}", kind.label()),
         })
     }
+
+    fn is_busy(&self) -> bool {
+        self.state == AgentScreenState::Busy
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -3755,6 +3802,12 @@ impl AgentStatusFileMonitor {
 
         should_notify.then(|| agent_status_notification(&key, tab_title, pane_id))
     }
+
+    fn is_running(&self) -> bool {
+        self.last_key
+            .as_ref()
+            .is_some_and(|key| is_terminal_agent_running_status(&key.state))
+    }
 }
 
 fn read_agent_status(path: &Path) -> Option<AgentStatusKey> {
@@ -3784,6 +3837,10 @@ fn is_terminal_agent_status(state: &str) -> bool {
         state,
         "done" | "complete" | "completed" | "success" | "blocked" | "failed" | "needs_input"
     )
+}
+
+fn is_terminal_agent_running_status(state: &str) -> bool {
+    matches!(state, "running" | "busy" | "working")
 }
 
 fn agent_status_notification(
@@ -4843,6 +4900,7 @@ summary = "started"
         )
         .unwrap();
         assert!(monitor.update("work", PaneId(7)).is_none());
+        assert!(monitor.is_running());
 
         fs::write(
             &path,
@@ -4855,6 +4913,7 @@ updated_token = "1"
         .unwrap();
         let notification = monitor.update("work", PaneId(7)).unwrap();
 
+        assert!(!monitor.is_running());
         assert_eq!(notification.title, "neovide-tabs");
         assert_eq!(notification.subtitle, Some("work · pane 7".to_owned()));
         assert_eq!(notification.body, "Agent done: implemented and tested");
