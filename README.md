@@ -29,12 +29,20 @@ just terminal
 ```sh
 just             # list recipes
 just terminal    # launch the terminal prototype
+just adr         # list Architecture Decision Records
+just adr-new     # create a new ADR
 just check       # cargo check
 just test        # cargo test
 just fmt         # cargo fmt
 just verify      # fmt --check + check + test
 just doctor      # print tool versions and selected font
 ```
+
+## Architecture Decisions
+
+Architecture Decision Records live in [`docs/adr`](docs/adr). They capture the
+long-term direction for decisions such as the native macOS shell, Rust terminal
+core, Metal renderer, and Kitty graphics protocol support.
 
 ## Configuration
 
