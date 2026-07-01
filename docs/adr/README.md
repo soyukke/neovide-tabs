@@ -11,6 +11,7 @@ allowed to differ from the target design.
 - [0001: Manage architecture decisions as ADRs](0001-manage-architecture-decisions-as-adrs.md)
 - [0002: Target a native macOS shell with Rust terminal core and Metal renderer](0002-target-native-macos-shell-rust-core-metal-renderer.md)
 - [0003: Prioritize Kitty graphics protocol for inline images](0003-prioritize-kitty-graphics-protocol-for-inline-images.md)
+- [0004: Use a warning-free Rust lint gate](0004-use-clippy-warning-free-rust-gate.md)
 
 ## Workflow
 

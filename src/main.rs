@@ -1,5 +1,3 @@
-mod scroll;
-
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -29,8 +27,18 @@ use macroquad::{
     miniquad::{EventHandler, KeyMods},
 };
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
-use scroll::SmoothScroll;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+
+use neovide_tabs::{
+    core::{
+        KittyGraphicsState, KittyGraphicsTracker, PaneId, PaneLayout, SessionPaneState,
+        SessionState, SessionTabState, SplitAxis,
+    },
+    scroll::SmoothScroll,
+};
+
+#[cfg(test)]
+use neovide_tabs::core::{StoredPaneLayout, StoredSplitAxis};
 
 const FONT_SIZE: u16 = 17;
 const SCROLL_ROWS_PER_WHEEL_UNIT: f32 = 3.0;
@@ -291,93 +299,6 @@ fn agent_shim_dir(pane_id: PaneId) -> Option<PathBuf> {
     app_state_dir().map(|path| path.join("shims").join(format!("pane-{}", pane_id.0)))
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
-struct SessionState {
-    #[serde(default)]
-    active_tab: usize,
-    #[serde(default)]
-    tabs: Vec<SessionTabState>,
-}
-
-impl SessionState {
-    fn load(path: Option<&Path>) -> Result<Option<Self>> {
-        let Some(path) = path else {
-            return Ok(None);
-        };
-
-        if !path.exists() {
-            return Ok(None);
-        }
-
-        let contents = fs::read_to_string(path)
-            .with_context(|| format!("failed to read session {}", path.display()))?;
-        let state = toml::from_str(&contents)
-            .with_context(|| format!("failed to parse session {}", path.display()))?;
-        Ok(Some(state))
-    }
-
-    fn save(&self, path: Option<&Path>) -> Result<()> {
-        let Some(path) = path else {
-            return Ok(());
-        };
-
-        if self.tabs.is_empty() {
-            return Ok(());
-        }
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create session dir {}", parent.display()))?;
-        }
-
-        let contents = toml::to_string_pretty(self).context("failed to serialize session")?;
-        let tmp_path = path.with_extension("toml.tmp");
-        fs::write(&tmp_path, contents)
-            .with_context(|| format!("failed to write session {}", tmp_path.display()))?;
-        fs::rename(&tmp_path, path)
-            .with_context(|| format!("failed to replace session {}", path.display()))?;
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-struct SessionTabState {
-    title: String,
-    #[serde(default)]
-    active_pane: usize,
-    #[serde(default)]
-    theme: String,
-    #[serde(default)]
-    panes: Vec<SessionPaneState>,
-    layout: StoredPaneLayout,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-struct SessionPaneState {
-    id: usize,
-    cwd: Option<PathBuf>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum StoredPaneLayout {
-    Leaf {
-        pane: usize,
-    },
-    Split {
-        axis: StoredSplitAxis,
-        first: Box<StoredPaneLayout>,
-        second: Box<StoredPaneLayout>,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum StoredSplitAxis {
-    Vertical,
-    Horizontal,
-}
-
 #[macroquad::main(window_conf)]
 async fn main() {
     if let Err(error) = run().await {
@@ -385,7 +306,7 @@ async fn main() {
         loop {
             clear_background(Color::from_rgba(18, 20, 24, 255));
             draw_text_ex(
-                &format!("{error:#}"),
+                format!("{error:#}"),
                 24.0,
                 48.0,
                 TextParams {
@@ -451,144 +372,6 @@ async fn run() -> Result<()> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PaneId(usize);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SplitAxis {
-    Vertical,
-    Horizontal,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum PaneLayout {
-    Leaf(PaneId),
-    Split {
-        axis: SplitAxis,
-        first: Box<PaneLayout>,
-        second: Box<PaneLayout>,
-    },
-}
-
-impl PaneLayout {
-    fn split_leaf(&mut self, target: PaneId, new_pane: PaneId, axis: SplitAxis) -> bool {
-        match self {
-            Self::Leaf(id) if *id == target => {
-                *self = Self::Split {
-                    axis,
-                    first: Box::new(Self::Leaf(*id)),
-                    second: Box::new(Self::Leaf(new_pane)),
-                };
-                true
-            }
-            Self::Leaf(_) => false,
-            Self::Split { first, second, .. } => {
-                first.split_leaf(target, new_pane, axis)
-                    || second.split_leaf(target, new_pane, axis)
-            }
-        }
-    }
-
-    fn without_leaf(self, target: PaneId) -> Option<Self> {
-        match self {
-            Self::Leaf(id) if id == target => None,
-            Self::Leaf(id) => Some(Self::Leaf(id)),
-            Self::Split {
-                axis,
-                first,
-                second,
-            } => match (first.without_leaf(target), second.without_leaf(target)) {
-                (Some(first), Some(second)) => Some(Self::Split {
-                    axis,
-                    first: Box::new(first),
-                    second: Box::new(second),
-                }),
-                (Some(layout), None) | (None, Some(layout)) => Some(layout),
-                (None, None) => None,
-            },
-        }
-    }
-
-    fn first_leaf(&self) -> Option<PaneId> {
-        match self {
-            Self::Leaf(id) => Some(*id),
-            Self::Split { first, .. } => first.first_leaf(),
-        }
-    }
-
-    fn collect(&self, rect: Rect, out: &mut Vec<(PaneId, Rect)>) {
-        match self {
-            Self::Leaf(id) => out.push((*id, rect)),
-            Self::Split {
-                axis,
-                first,
-                second,
-            } => {
-                let (first_rect, second_rect) = split_rect(rect, *axis);
-                first.collect(first_rect, out);
-                second.collect(second_rect, out);
-            }
-        }
-    }
-
-    fn contains_only(&self, pane_ids: &[PaneId]) -> bool {
-        match self {
-            Self::Leaf(id) => pane_ids.contains(id),
-            Self::Split { first, second, .. } => {
-                first.contains_only(pane_ids) && second.contains_only(pane_ids)
-            }
-        }
-    }
-
-    fn to_stored(&self) -> StoredPaneLayout {
-        match self {
-            Self::Leaf(id) => StoredPaneLayout::Leaf { pane: id.0 },
-            Self::Split {
-                axis,
-                first,
-                second,
-            } => StoredPaneLayout::Split {
-                axis: StoredSplitAxis::from_axis(*axis),
-                first: Box::new(first.to_stored()),
-                second: Box::new(second.to_stored()),
-            },
-        }
-    }
-}
-
-impl StoredPaneLayout {
-    fn to_runtime(&self) -> PaneLayout {
-        match self {
-            Self::Leaf { pane } => PaneLayout::Leaf(PaneId(*pane)),
-            Self::Split {
-                axis,
-                first,
-                second,
-            } => PaneLayout::Split {
-                axis: axis.to_axis(),
-                first: Box::new(first.to_runtime()),
-                second: Box::new(second.to_runtime()),
-            },
-        }
-    }
-}
-
-impl StoredSplitAxis {
-    fn from_axis(axis: SplitAxis) -> Self {
-        match axis {
-            SplitAxis::Vertical => Self::Vertical,
-            SplitAxis::Horizontal => Self::Horizontal,
-        }
-    }
-
-    fn to_axis(self) -> SplitAxis {
-        match self {
-            Self::Vertical => SplitAxis::Vertical,
-            Self::Horizontal => SplitAxis::Horizontal,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 struct PanePlacement {
     id: PaneId,
@@ -610,6 +393,8 @@ struct TerminalPane {
     terminal: Terminal<'static, 'static>,
     renderer: TerminalRenderer,
     osc: OscTracker,
+    kitty: KittyGraphicsTracker,
+    graphics: KittyGraphicsState,
     agent_status: AgentStatusFileMonitor,
     agent_monitor: AgentMonitor,
     smooth_scroll: SmoothScroll,
@@ -658,6 +443,8 @@ impl TerminalPane {
             terminal,
             renderer: TerminalRenderer::new()?,
             osc: OscTracker::new(),
+            kitty: KittyGraphicsTracker::new(),
+            graphics: KittyGraphicsState::new(),
             agent_status: AgentStatusFileMonitor::new(agent_status_path),
             agent_monitor: AgentMonitor::new(),
             smooth_scroll: SmoothScroll::new(),
@@ -714,7 +501,11 @@ impl TerminalPane {
             &self.pty.rx,
             &mut self.terminal,
             &self.pty_replies,
-            &mut self.osc,
+            TerminalProtocolTrackers {
+                osc: &mut self.osc,
+                kitty: &mut self.kitty,
+                graphics: &mut self.graphics,
+            },
             debug_pty,
             Some(self.id),
         );
@@ -779,35 +570,32 @@ impl TerminalPane {
         let frame = self.renderer.collect(&mut self.terminal)?;
         let animated_cursor = self.cursor_motion.update(frame.cursor, dt);
 
-        if self.last_wheel_at.is_none() {
-            if let (Some(previous_rows), Some(previous_scrollbar)) =
+        if self.last_wheel_at.is_none()
+            && let (Some(previous_rows), Some(previous_scrollbar)) =
                 (self.previous_rows.as_deref(), self.previous_scrollbar)
-            {
-                let shifted_rows = detect_output_scroll_rows(
-                    previous_rows,
-                    previous_scrollbar,
-                    &frame.rows,
-                    frame.scrollbar,
-                );
-                if shifted_rows != 0 {
-                    if debug_scroll {
-                        eprintln!(
-                            "nvterm scroll: pane={:?} output-shift rows={shifted_rows}",
-                            self.id
-                        );
-                    }
-                    self.smooth_scroll.on_screen_shift(shifted_rows);
+        {
+            let shifted_rows = detect_output_scroll_rows(
+                previous_rows,
+                previous_scrollbar,
+                &frame.rows,
+                frame.scrollbar,
+            );
+            if shifted_rows != 0 {
+                if debug_scroll {
+                    eprintln!(
+                        "nvterm scroll: pane={:?} output-shift rows={shifted_rows}",
+                        self.id
+                    );
                 }
+                self.smooth_scroll.on_screen_shift(shifted_rows);
             }
         }
 
         self.previous_rows = Some(frame.rows.clone());
         self.previous_scrollbar = Some(frame.scrollbar);
         let mut notifications = Vec::new();
-        if status_files {
-            if let Some(notification) = self.agent_status.update(tab_title, self.id) {
-                notifications.push(notification);
-            }
+        if status_files && let Some(notification) = self.agent_status.update(tab_title, self.id) {
+            notifications.push(notification);
         }
         if let Some(notification) =
             self.agent_monitor
@@ -881,7 +669,7 @@ impl TerminalTab {
 
     fn pane_placements(&self, rect: Rect, metrics: CellMetrics) -> Vec<PanePlacement> {
         let mut rects = Vec::new();
-        self.layout.collect(rect, &mut rects);
+        self.layout.collect_with(rect, &split_rect, &mut rects);
         rects
             .into_iter()
             .map(|(id, rect)| PanePlacement {
@@ -1031,10 +819,10 @@ impl AppState {
             agent_status_dir,
             session_dirty: true,
         };
-        if let Some(session) = saved_session {
-            if state.restore_session(session, content_rect, metrics)? {
-                return Ok(state);
-            }
+        if let Some(session) = saved_session
+            && state.restore_session(session, content_rect, metrics)?
+        {
+            return Ok(state);
         }
         state.new_tab(content_rect, metrics)?;
         Ok(state)
@@ -1315,10 +1103,10 @@ impl AppState {
             return Ok(false);
         }
 
-        if !input.bytes.is_empty() {
-            if let Some(pane) = self.active_tab_mut().active_pane_mut() {
-                pane.write_all(&input.bytes)?;
-            }
+        if !input.bytes.is_empty()
+            && let Some(pane) = self.active_tab_mut().active_pane_mut()
+        {
+            pane.write_all(&input.bytes)?;
         }
 
         Ok(false)
@@ -1564,11 +1352,11 @@ impl AppState {
         if is_mouse_button_pressed(MouseButton::Right) {
             let (x, y) = mouse_position();
             let pos = vec2(x, y);
-            if y < TAB_BAR_HEIGHT {
-                if let Some(tab_idx) = tab_index_at(pos, self.tabs.len()) {
-                    self.open_tab_context_menu(tab_idx, pos);
-                    return Ok(());
-                }
+            if y < TAB_BAR_HEIGHT
+                && let Some(tab_idx) = tab_index_at(pos, self.tabs.len())
+            {
+                self.open_tab_context_menu(tab_idx, pos);
+                return Ok(());
             }
             self.tab_menu = None;
         }
@@ -1621,11 +1409,11 @@ impl AppState {
         if is_mouse_button_pressed(MouseButton::Right) {
             let (x, y) = mouse_position();
             let pos = vec2(x, y);
-            if y < TAB_BAR_HEIGHT {
-                if let Some(tab_idx) = tab_index_at(pos, self.tabs.len()) {
-                    self.open_tab_context_menu(tab_idx, pos);
-                    return Ok(true);
-                }
+            if y < TAB_BAR_HEIGHT
+                && let Some(tab_idx) = tab_index_at(pos, self.tabs.len())
+            {
+                self.open_tab_context_menu(tab_idx, pos);
+                return Ok(true);
             }
             self.tab_menu = None;
             return Ok(true);
@@ -1715,16 +1503,16 @@ impl AppState {
                         }
                     }
                     if is_active_tab {
-                        draw_frame(
-                            &frame,
-                            placement.viewport,
-                            placement.rect,
+                        draw_frame(DrawFrameRequest {
+                            frame: &frame,
+                            viewport: placement.viewport,
+                            rect: placement.rect,
                             fonts,
-                            pane.smooth_scroll.visual_offset_rows(),
+                            visual_offset_rows: pane.smooth_scroll.visual_offset_rows(),
                             animated_cursor,
-                            is_active_pane,
+                            active: is_active_pane,
                             theme,
-                        );
+                        });
                     }
                 }
             }
@@ -2904,6 +2692,9 @@ fn set_scissor(rect: Option<Rect>) {
         )
     });
 
+    // SAFETY: macroquad exposes scissor control only through its internal GL
+    // handle. The handle is used immediately on the render thread and is not
+    // stored across frames.
     unsafe {
         let mut gl = macroquad::window::get_internal_gl();
         gl.flush();
@@ -3003,7 +2794,9 @@ fn find_osc_end(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
 
 fn trim_osc_pending(pending: &mut Vec<u8>) {
     if pending.last() == Some(&0x1b) {
-        let esc = pending.pop().expect("checked last byte");
+        let Some(esc) = pending.pop() else {
+            return;
+        };
         pending.clear();
         pending.push(esc);
     } else {
@@ -3083,11 +2876,17 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
+struct TerminalProtocolTrackers<'a> {
+    osc: &'a mut OscTracker,
+    kitty: &'a mut KittyGraphicsTracker,
+    graphics: &'a mut KittyGraphicsState,
+}
+
 fn drain_pty(
     rx: &Receiver<Vec<u8>>,
     terminal: &mut Terminal<'_, '_>,
     pty_replies: &Rc<RefCell<Vec<u8>>>,
-    osc: &mut OscTracker,
+    trackers: TerminalProtocolTrackers<'_>,
     debug_pty: bool,
     pane_id: Option<PaneId>,
 ) -> TerminalOscEvents {
@@ -3101,11 +2900,14 @@ fn drain_pty(
             }
         }
 
-        let chunk_events = osc.push(&bytes);
+        let chunk_events = trackers.osc.push(&bytes);
         if chunk_events.cwd.is_some() {
             events.cwd = chunk_events.cwd;
         }
         events.notifications.extend(chunk_events.notifications);
+        for command in trackers.kitty.push(&bytes) {
+            let _ = trackers.graphics.apply(command);
+        }
         terminal.vt_write(&bytes);
 
         if !pty_replies.borrow().is_empty() {
@@ -3494,16 +3296,29 @@ fn cap_output_scroll_rows(rows: u64, visible_rows: u64) -> isize {
     capped_rows.min(isize::MAX as u64) as isize
 }
 
-fn draw_frame(
-    frame: &TerminalFrame,
+struct DrawFrameRequest<'a> {
+    frame: &'a TerminalFrame,
     viewport: Viewport,
     rect: Rect,
-    fonts: &TerminalFonts,
+    fonts: &'a TerminalFonts,
     visual_offset_rows: f32,
     animated_cursor: Option<AnimatedCursor>,
     active: bool,
     theme: TerminalTheme,
-) {
+}
+
+fn draw_frame(request: DrawFrameRequest<'_>) {
+    let DrawFrameRequest {
+        frame,
+        viewport,
+        rect,
+        fonts,
+        visual_offset_rows,
+        animated_cursor,
+        active,
+        theme,
+    } = request;
+
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, frame.background);
     set_scissor(Some(rect));
 
@@ -3773,10 +3588,10 @@ impl TerminalFonts {
 }
 
 async fn load_latin_font(config: &AppConfig) -> Option<Font> {
-    if let Some(path) = config.font.latin.as_deref() {
-        if let Some(font) = load_font_path(path).await {
-            return Some(font);
-        }
+    if let Some(path) = config.font.latin.as_deref()
+        && let Some(font) = load_font_path(path).await
+    {
+        return Some(font);
     }
 
     for env_key in ["NVTERM_FONT", "NVTERM_LATIN_FONT"] {
@@ -3798,10 +3613,10 @@ async fn load_latin_font(config: &AppConfig) -> Option<Font> {
 }
 
 async fn load_cjk_font(config: &AppConfig) -> Option<Font> {
-    if let Some(path) = config.font.cjk.as_deref() {
-        if let Some(font) = load_font_path(path).await {
-            return Some(font);
-        }
+    if let Some(path) = config.font.cjk.as_deref()
+        && let Some(font) = load_font_path(path).await
+    {
+        return Some(font);
     }
 
     load_first_font(&[
@@ -4572,21 +4387,21 @@ impl PtySession {
         cmd.env("NVTERM_PANE_ID", pane_id.0.to_string());
         let real_claude = find_executable_in_path("claude");
         let real_codex = find_executable_in_path("codex");
-        if let Some(shim_dir) = agent_shim_dir(pane_id) {
-            if install_agent_command_shims(&shim_dir).is_ok() {
-                cmd.env("NVTERM_AGENT_SHIM_DIR", &shim_dir);
-                if let Some(path) = real_claude {
-                    cmd.env("NVTERM_REAL_CLAUDE", path);
-                }
-                if let Some(path) = real_codex {
-                    cmd.env("NVTERM_REAL_CODEX", path);
-                }
-                if let Some(path) = env::var_os("PATH") {
-                    let mut paths = vec![shim_dir];
-                    paths.extend(env::split_paths(&path));
-                    if let Ok(joined) = env::join_paths(paths) {
-                        cmd.env("PATH", joined);
-                    }
+        if let Some(shim_dir) = agent_shim_dir(pane_id)
+            && install_agent_command_shims(&shim_dir).is_ok()
+        {
+            cmd.env("NVTERM_AGENT_SHIM_DIR", &shim_dir);
+            if let Some(path) = real_claude {
+                cmd.env("NVTERM_REAL_CLAUDE", path);
+            }
+            if let Some(path) = real_codex {
+                cmd.env("NVTERM_REAL_CODEX", path);
+            }
+            if let Some(path) = env::var_os("PATH") {
+                let mut paths = vec![shim_dir];
+                paths.extend(env::split_paths(&path));
+                if let Ok(joined) = env::join_paths(paths) {
+                    cmd.env("PATH", joined);
                 }
             }
         }

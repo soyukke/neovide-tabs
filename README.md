@@ -29,12 +29,14 @@ just terminal
 ```sh
 just             # list recipes
 just terminal    # launch the terminal prototype
+just native-spike # build and run the AppKit/Metal spike
 just adr         # list Architecture Decision Records
 just adr-new     # create a new ADR
 just check       # cargo check
+just lint        # clippy with -D warnings
 just test        # cargo test
 just fmt         # cargo fmt
-just verify      # fmt --check + check + test
+just verify      # fmt --check + check + lint + test
 just doctor      # print tool versions and selected font
 ```
 
@@ -43,6 +45,13 @@ just doctor      # print tool versions and selected font
 Architecture Decision Records live in [`docs/adr`](docs/adr). They capture the
 long-term direction for decisions such as the native macOS shell, Rust terminal
 core, Metal renderer, and Kitty graphics protocol support.
+
+The Rust lint gate is intentionally strict: `just verify` runs
+`cargo clippy --all-targets --all-features -- -D warnings`. New code should
+either satisfy the lint or have a narrow, explicit reason for an allow.
+
+Native macOS shell exploration lives in [`spikes/macos-shell`](spikes/macos-shell).
+It is intentionally separate from the current `macroquad` prototype.
 
 ## Configuration
 

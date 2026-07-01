@@ -25,6 +25,7 @@
         {
           default = pkgs.mkShell {
             packages = [
+              pkgs.clippy
               pkgs.cargo
               pkgs.git
               pkgs.just

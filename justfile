@@ -33,6 +33,12 @@ terminal:
 alias run := terminal
 alias launch := terminal
 
+# Build and run the native macOS shell spike.
+native-spike:
+    @mkdir -p spikes/macos-shell/.build
+    @swiftc spikes/macos-shell/NativeShellSpike.swift -framework AppKit -framework MetalKit -o spikes/macos-shell/.build/NativeShellSpike
+    @exec spikes/macos-shell/.build/NativeShellSpike
+
 # Update the current neovide-tabs pane's agent status.
 agent-status state summary="":
     @./scripts/nvterm-agent-status "{{state}}" "{{summary}}"
@@ -45,13 +51,17 @@ check:
 test:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just test; else cargo test; fi
 
+# Run the zero-debt Rust lint gate.
+lint:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just lint; else cargo clippy --all-targets --all-features -- -D warnings; fi
+
 # Format Rust sources.
 fmt:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just fmt; else cargo fmt; fi
 
-# Verify formatting, type checking, and tests.
+# Verify formatting, type checking, linting, and tests.
 verify:
-    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just verify; else cargo fmt -- --check && cargo check && cargo test; fi
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just verify; else cargo fmt -- --check && cargo check && cargo clippy --all-targets --all-features -- -D warnings && cargo test; fi
 
 # Remove Rust build artifacts.
 clean:
