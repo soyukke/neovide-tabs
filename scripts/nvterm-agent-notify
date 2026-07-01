@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+status_script="${script_dir}/nvterm-agent-status"
+
+source_name="${1:-agent}"
+event_name="${2:-done}"
+shift $(( $# >= 1 ? 1 : 0 ))
+shift $(( $# >= 1 ? 1 : 0 ))
+
+delegate_file=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --delegate)
+      delegate_file="${2:-}"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+payload="$(cat || true)"
+
+json_value() {
+  local key="$1"
+  if [[ -z "$payload" ]] || ! command -v jq >/dev/null 2>&1; then
+    return 0
+  fi
+  jq -r --arg key "$key" 'if type == "object" then .[$key] // empty else empty end' \
+    <<<"$payload" 2>/dev/null || true
+}
+
+hook_event="$(json_value hook_event_name)"
+notification_type="$(json_value notification_type)"
+message="$(json_value message)"
+
+state="$event_name"
+case "$state" in
+  auto|"")
+    state="$hook_event"
+    ;;
+esac
+
+case "$state" in
+  UserPromptSubmit|SessionStart|start|running)
+    state="running"
+    ;;
+  Notification|notification|needs-input|needs_input)
+    state="needs_input"
+    ;;
+  Stop|SessionEnd|turn-ended|turn_ended|done|complete|completed|success)
+    state="done"
+    ;;
+  blocked|failed)
+    ;;
+  *)
+    state="done"
+    ;;
+esac
+
+case "$source_name" in
+  claude)
+    agent_label="Claude Code"
+    ;;
+  codex)
+    agent_label="Codex"
+    ;;
+  *)
+    agent_label="Agent"
+    ;;
+esac
+
+summary="$agent_label turn ended"
+case "$state" in
+  running)
+    summary="$agent_label running"
+    ;;
+  needs_input)
+    summary="$agent_label needs input"
+    ;;
+  blocked)
+    summary="$agent_label blocked"
+    ;;
+  failed)
+    summary="$agent_label failed"
+    ;;
+esac
+
+if [[ -n "$message" ]]; then
+  summary="$message"
+elif [[ -n "$notification_type" && "$state" == "needs_input" ]]; then
+  summary="$agent_label needs input: $notification_type"
+fi
+
+if [[ -n "${NVTERM_AGENT_STATUS_FILE:-}" ]]; then
+  "$status_script" "$state" "$summary" >/dev/null 2>&1 || true
+fi
+
+if [[ -n "$delegate_file" && -f "$delegate_file" ]] && command -v jq >/dev/null 2>&1; then
+  mapfile -t delegate < <(jq -r 'if type == "array" then .[] else empty end' "$delegate_file")
+  if [[ ${#delegate[@]} -gt 0 && "${delegate[0]}" != "$0" ]]; then
+    "${delegate[@]}" >/dev/null 2>&1 || true
+  fi
+fi
+
+exit 0

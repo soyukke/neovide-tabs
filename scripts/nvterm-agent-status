@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+state="${1:-}"
+shift || true
+summary="$*"
+
+if [[ -z "$state" ]]; then
+  echo "usage: nvterm-agent-status <running|done|blocked|failed|needs_input> [summary...]" >&2
+  exit 64
+fi
+
+status_file="${NVTERM_AGENT_STATUS_FILE:-}"
+if [[ -z "$status_file" ]]; then
+  echo "NVTERM_AGENT_STATUS_FILE is not set; run this inside neovide-tabs" >&2
+  exit 65
+fi
+
+escape_toml_string() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+mkdir -p "$(dirname "$status_file")"
+tmp="${status_file}.$$"
+{
+  printf 'state = "%s"\n' "$(escape_toml_string "$state")"
+  printf 'summary = "%s"\n' "$(escape_toml_string "$summary")"
+  printf 'updated_token = "%s"\n' "$(escape_toml_string "$(date +%s).$$.${RANDOM:-0}")"
+  printf 'updated_unix = %s\n' "$(date +%s)"
+} > "$tmp"
+mv "$tmp" "$status_file"
