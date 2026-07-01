@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+notify_script="${script_dir}/nvterm-agent-notify"
+settings_file="$(mktemp "${TMPDIR:-/tmp}/nvterm-claude-settings.XXXXXX.json")"
+
+cleanup() {
+  rm -f "$settings_file"
+}
+trap cleanup EXIT
+
+python3 - "$notify_script" "$settings_file" <<'PY'
+import json
+import pathlib
+import shlex
+import sys
+
+notify_script = sys.argv[1]
+settings_file = pathlib.Path(sys.argv[2])
+
+def hook(source, state):
+    command = " ".join(["bash", shlex.quote(notify_script), source, state])
+    return [
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": command,
+                    "timeout": 5,
+                }
+            ]
+        }
+    ]
+
+settings = {
+    "hooks": {
+        "UserPromptSubmit": hook("claude", "running"),
+        "Notification": hook("claude", "needs_input"),
+        "Stop": hook("claude", "done"),
+    }
+}
+
+settings_file.write_text(json.dumps(settings, indent=2) + "\n")
+PY
+
+claude --settings "$settings_file" "$@"

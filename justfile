@@ -22,9 +22,13 @@ alias launch := terminal
 agent-status state summary="":
     @./scripts/nvterm-agent-status "{{state}}" "{{summary}}"
 
-# Install Claude Code and Codex notification hooks for neovide-tabs panes.
-install-agent-notifications:
-    @./scripts/install-agent-notifications
+# Launch Claude Code with per-invocation neovide-tabs notification hooks.
+agent-claude:
+    @./scripts/nvterm-claude
+
+# Launch Codex with per-invocation neovide-tabs notification hooks.
+agent-codex:
+    @./scripts/nvterm-codex
 
 # Check the Rust crate.
 check:
