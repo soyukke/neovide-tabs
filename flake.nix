@@ -31,6 +31,7 @@
               pkgs.just
               pkgs.jq
               pkgs.nerd-fonts.caskaydia-cove
+              pkgs.neovim
               pkgs.python3
               pkgs.rust-analyzer
               pkgs.rustc

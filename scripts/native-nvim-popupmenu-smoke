@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+app="spikes/macos-shell/.build/NativeShellSpike"
+shot="spikes/macos-shell/.build/native-nvim-popupmenu.png"
+result_file="spikes/macos-shell/.build/native-nvim-popupmenu.result"
+window_id_file="spikes/macos-shell/.build/native-nvim-popupmenu-window-id"
+capture_error="spikes/macos-shell/.build/native-nvim-popupmenu-screencapture.err"
+verify_error="spikes/macos-shell/.build/native-nvim-popupmenu-verify.err"
+
+rm -f "$shot" "$result_file" "$window_id_file" "$capture_error" "$verify_error"
+
+NVTERM_NATIVE_PANE=nvim \
+  NVTERM_NATIVE_SMOKE_SCENARIO=nvim-popupmenu \
+  NVTERM_NATIVE_SMOKE_RESULT="$result_file" \
+  NVTERM_NATIVE_SMOKE_WINDOW_ID="$window_id_file" \
+  NVTERM_NATIVE_SMOKE_KEEP_OPEN=1 \
+  "$app" &
+app_pid=$!
+
+cleanup() {
+  if kill -0 "$app_pid" 2>/dev/null; then
+    kill "$app_pid" 2>/dev/null || true
+    wait "$app_pid" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+for _ in {1..100}; do
+  if [[ -s "$window_id_file" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+
+if [[ ! -s "$window_id_file" ]]; then
+  echo "native popupmenu smoke failed: window id was not written" >&2
+  exit 1
+fi
+
+window_id=$(tr -d '[:space:]' < "$window_id_file")
+if [[ -z "$window_id" ]]; then
+  echo "native popupmenu smoke failed: empty window id" >&2
+  exit 1
+fi
+
+for _ in {1..100}; do
+  if [[ -s "$result_file" ]] &&
+    /usr/sbin/screencapture -x -l "$window_id" "$shot" 2>"$capture_error" &&
+    [[ -s "$shot" ]] &&
+    ./scripts/native-smoke-verify "$shot" nvim-popupmenu "$result_file" 2>"$verify_error"; then
+    cat "$result_file"
+    exit 0
+  fi
+  sleep 0.15
+done
+
+if [[ -s "$verify_error" ]]; then
+  cat "$verify_error" >&2
+elif [[ -s "$capture_error" ]]; then
+  cat "$capture_error" >&2
+else
+  echo "native popupmenu smoke failed before verifier ran" >&2
+fi
+exit 1

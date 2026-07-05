@@ -26,24 +26,203 @@ adr-new title:
     sed -e "s/NNNN/${next}/" -e "s/Title/${escaped_title}/" -e "s/YYYY-MM-DD/$(date +%F)/" docs/adr/template.md > "$path"; \
     echo "$path"
 
-# Launch the terminal prototype.
+# Launch the native macOS terminal host.
 terminal:
-    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal; else exec cargo run; fi
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal; else just native-build && exec spikes/macos-shell/.build/NativeShellSpike; fi
+
+# Launch the native Neovim UI pane.
+neovim:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just neovim; else just native-build && NVTERM_NATIVE_PANE=nvim exec spikes/macos-shell/.build/NativeShellSpike; fi
 
 alias run := terminal
 alias launch := terminal
 
-# Build and run the native macOS shell spike.
+# Build the native macOS terminal host.
+native-build:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-build; else cargo build --lib && mkdir -p spikes/macos-shell/.build && sdk=$(env -u SDKROOT -u DEVELOPER_DIR /usr/bin/xcrun --sdk macosx --show-sdk-path) && env -u SDKROOT -u DEVELOPER_DIR /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -sdk "$sdk" spikes/macos-shell/NativeShellSpike.swift target/debug/libneovide_tabs.a -framework AppKit -framework MetalKit -framework Metal -framework QuartzCore -lc++ -o spikes/macos-shell/.build/NativeShellSpike; fi
+
+# Build and run the native macOS terminal host.
 native-spike:
-    @mkdir -p spikes/macos-shell/.build
-    @swiftc spikes/macos-shell/NativeShellSpike.swift -framework AppKit -framework MetalKit -o spikes/macos-shell/.build/NativeShellSpike
-    @exec spikes/macos-shell/.build/NativeShellSpike
+    @just terminal
+
+# Build, launch briefly, capture the native shell view, and exit.
+native-smoke:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-smoke; else just native-build && ./scripts/native-smoke; fi
+
+# Verify terminal-pane Vim-style scroll produces Skia animation frames.
+terminal-vim-scroll-smoke:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-vim-scroll-smoke; else just native-build && ./scripts/native-terminal-vim-scroll-smoke; fi
+
+# Capture the native Neovim Skia/Metal pane and verify it is nonblank.
+nvim-skia-smoke:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just nvim-skia-smoke; else just native-build && ./scripts/native-nvim-smoke; fi
+
+# Run all deterministic native Neovim animation smoke scenarios.
+nvim-smoke-all:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-all; \
+    else \
+        just native-build; \
+        just _nvim-smoke nvim-scroll; \
+        just _nvim-smoke nvim-jump; \
+        just _nvim-smoke nvim-side-pane; \
+        just _nvim-smoke nvim-commandline; \
+        just _nvim-smoke nvim-shaped-text; \
+        just _nvim-smoke-shaped-text-visual; \
+        just _nvim-smoke-ui-surfaces; \
+        just _nvim-smoke-popupmenu; \
+        just _nvim-smoke-cursor-normal-shape; \
+        just _nvim-smoke-cursor-shape; \
+        just _nvim-smoke-cursor-replace-shape; \
+        just _nvim-smoke-cursor-blink; \
+        just _nvim-smoke-cursor-switch; \
+    fi
+
+# Verify Ctrl-D style Neovim scroll animation.
+nvim-smoke-scroll:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-scroll; \
+    else \
+        just native-build && just _nvim-smoke nvim-scroll; \
+    fi
+
+# Verify large Neovim jump animation.
+nvim-smoke-jump:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-jump; \
+    else \
+        just native-build && just _nvim-smoke nvim-jump; \
+    fi
+
+# Verify side-pane scroll hints stay column-bounded.
+nvim-smoke-side-pane:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-side-pane; \
+    else \
+        just native-build && just _nvim-smoke nvim-side-pane; \
+    fi
+
+# Verify command-line input does not trigger scroll animation.
+nvim-smoke-commandline:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-commandline; \
+    else \
+        just native-build && just _nvim-smoke nvim-commandline; \
+    fi
+
+# Verify shaped Japanese, Nerd Font, combining, and ambiguous-width text reaches Skia.
+nvim-smoke-shaped-text:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-shaped-text; \
+    else \
+        just native-build && just _nvim-smoke nvim-shaped-text; \
+    fi
+
+# Verify shaped text has visible glyph pixels in the captured Skia/Metal surface.
+nvim-smoke-shaped-text-visual:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-shaped-text-visual; \
+    else \
+        just native-build && just _nvim-smoke-shaped-text-visual; \
+    fi
+
+_nvim-smoke-shaped-text-visual:
+    @./scripts/native-nvim-shaped-text-visual-smoke
+
+# Verify split, floating-window, message, and blend surfaces in model and screenshot.
+nvim-smoke-ui-surfaces:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-ui-surfaces; \
+    else \
+        just native-build && just _nvim-smoke-ui-surfaces; \
+    fi
+
+_nvim-smoke-ui-surfaces:
+    @./scripts/native-nvim-ui-surfaces-smoke
+
+# Verify Neovim popupmenu reaches the retained model and Skia/Metal surface.
+nvim-smoke-popupmenu:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-popupmenu; \
+    else \
+        just native-build && just _nvim-smoke-popupmenu; \
+    fi
+
+_nvim-smoke-popupmenu:
+    @./scripts/native-nvim-popupmenu-smoke
+
+# Verify Neovim mode cursor shape reaches the Skia/Metal cursor body.
+nvim-smoke-cursor-shape:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-cursor-shape; \
+    else \
+        just native-build && just _nvim-smoke-cursor-shape; \
+    fi
+
+_nvim-smoke-cursor-shape:
+    @./scripts/native-nvim-cursor-shape-smoke
+
+# Verify normal mode block cursor shape reaches the Skia/Metal cursor body.
+nvim-smoke-cursor-normal-shape:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-cursor-normal-shape; \
+    else \
+        just native-build && just _nvim-smoke-cursor-normal-shape; \
+    fi
+
+_nvim-smoke-cursor-normal-shape:
+    @./scripts/native-nvim-cursor-shape-smoke nvim-cursor-normal-shape nvim-cursor-normal-shape cursor-normal-shape
+
+# Verify replace mode horizontal cursor shape reaches the Skia/Metal cursor body.
+nvim-smoke-cursor-replace-shape:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-cursor-replace-shape; \
+    else \
+        just native-build && just _nvim-smoke-cursor-replace-shape; \
+    fi
+
+_nvim-smoke-cursor-replace-shape:
+    @./scripts/native-nvim-cursor-shape-smoke nvim-cursor-replace-shape nvim-cursor-replace-shape cursor-replace-shape
+
+# Verify blink scheduling hides the Skia/Metal cursor body during the off phase.
+nvim-smoke-cursor-blink:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-cursor-blink; \
+    else \
+        just native-build && just _nvim-smoke-cursor-blink; \
+    fi
+
+_nvim-smoke-cursor-blink:
+    @./scripts/native-nvim-cursor-blink-smoke
+
+# Verify cursor body is visible after tab switch and previous pane trail is gone.
+nvim-smoke-cursor-switch:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-cursor-switch; \
+    else \
+        just native-build && just _nvim-smoke-cursor-switch; \
+    fi
+
+_nvim-smoke-cursor-switch:
+    @./scripts/native-nvim-cursor-switch-smoke
+
+_nvim-smoke scenario:
+    @tmp=$(mktemp); \
+    trap 'rm -f "$tmp"' EXIT; \
+    NVTERM_NATIVE_PANE=nvim \
+    NVTERM_NATIVE_SMOKE_SCENARIO="{{scenario}}" \
+    NVTERM_NATIVE_SMOKE_RESULT="$tmp" \
+        spikes/macos-shell/.build/NativeShellSpike \
+        >"/tmp/neovide-tabs-{{scenario}}.log" 2>&1; \
+    result=$(cat "$tmp"); \
+    echo "$result"; \
+    [[ "$result" == ok* ]]
 
 # Emit a tiny Kitty graphics protocol PNG in the current terminal.
 kitty-smoke:
     @./scripts/kitty-image-smoke
 
-# Launch the app and verify Kitty PNG rendering from a screenshot.
+# Skip until the native Kitty graphics renderer is implemented.
 kitty-render-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just kitty-render-smoke; else ./scripts/kitty-render-smoke; fi
 
