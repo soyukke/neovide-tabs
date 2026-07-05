@@ -6,9 +6,9 @@ Status: Accepted
 
 ## Context
 
-The current prototype uses `macroquad` for the window, input, and 2D drawing.
-That has been useful for moving quickly on Neovide-like cursor and scroll
-animation.
+The early prototype used `macroquad` for the window, input, and 2D drawing.
+That was useful for moving quickly on Neovide-like cursor and scroll animation,
+but it was not the target application shell.
 
 The intended product direction is broader:
 
@@ -37,17 +37,18 @@ MTKView/Metal renderer
   terminal cells, cursor animation, smooth scroll, inline images/textures
 ```
 
-The existing `macroquad` application remains a prototype and feature-discovery
-surface until the native shell and renderer are introduced.
+The native shell becomes the product path once it can launch real PTYs through
+the Rust terminal runtime. Prototype renderer code should not remain on the
+default launch path after that point.
 
 ## Consequences
 
 Native macOS UI is treated as part of the product architecture, not an optional
 skin around the prototype.
 
-Renderer-specific behavior should move behind boundaries that can later be
-called from an AppKit/Metal host. New protocol and session logic should avoid
-depending directly on `macroquad` where practical.
+Renderer-specific behavior should move behind boundaries that can be called from
+an AppKit/Metal host. New protocol and session logic should avoid depending on
+any frontend toolkit.
 
 The migration should be incremental. First separate reusable Rust core logic
 from UI drawing. Then introduce the native shell and Metal view without

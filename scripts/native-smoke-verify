@@ -1,0 +1,816 @@
+#!/usr/bin/env python3
+import struct
+import sys
+import zlib
+
+
+def main() -> int:
+    path = sys.argv[1] if len(sys.argv) > 1 else "spikes/macos-shell/.build/native-smoke.png"
+    mode = sys.argv[2] if len(sys.argv) > 2 else "terminal"
+    width, height, pixels = read_png_rgba(path)
+    if mode == "nvim-shaped-text-visual":
+        result_path = sys.argv[3] if len(sys.argv) > 3 else ""
+        verify_shaped_text_visual(width, height, pixels, result_path)
+        return 0
+    if mode == "nvim-cursor-switch":
+        result_path = sys.argv[3] if len(sys.argv) > 3 else ""
+        verify_cursor_switch(width, height, pixels, result_path)
+        return 0
+    if mode == "nvim-ui-surfaces":
+        result_path = sys.argv[3] if len(sys.argv) > 3 else ""
+        verify_ui_surfaces(width, height, pixels, result_path)
+        return 0
+    if mode == "nvim-popupmenu":
+        result_path = sys.argv[3] if len(sys.argv) > 3 else ""
+        verify_popupmenu(width, height, pixels, result_path)
+        return 0
+    if mode == "nvim-cursor-shape":
+        result_path = sys.argv[3] if len(sys.argv) > 3 else ""
+        verify_cursor_shape(width, height, pixels, result_path)
+        return 0
+    if mode == "nvim-cursor-normal-shape":
+        result_path = sys.argv[3] if len(sys.argv) > 3 else ""
+        verify_cursor_normal_shape(width, height, pixels, result_path)
+        return 0
+    if mode == "nvim-cursor-replace-shape":
+        result_path = sys.argv[3] if len(sys.argv) > 3 else ""
+        verify_cursor_replace_shape(width, height, pixels, result_path)
+        return 0
+    if mode == "nvim-cursor-blink":
+        result_path = sys.argv[3] if len(sys.argv) > 3 else ""
+        verify_cursor_blink(width, height, pixels, result_path)
+        return 0
+    if mode == "nvim-skia" and len(sys.argv) > 3:
+        verify_nvim_skia(width, height, pixels, sys.argv[3])
+        return 0
+
+    blue = 0
+    dark_surface = 0
+    terminal_text = 0
+
+    for y in range(height):
+        for x in range(width):
+            r, g, b, a = pixels[y][x]
+            if a > 200 and r < 40 and 90 < g < 180 and b > 180:
+                blue += 1
+            if y > height // 4 and a > 200 and r < 35 and g < 40 and b < 50:
+                dark_surface += 1
+            if y > height // 8 and a > 200 and r > 170 and g > 170 and b > 160:
+                terminal_text += 1
+
+    if width < 800 or height < 500:
+        raise SystemExit(f"native smoke image is too small: {width}x{height}")
+    if mode == "terminal" and blue < 500:
+        raise SystemExit(f"native smoke tab pixels missing: blue={blue}")
+    if dark_surface < 100_000:
+        raise SystemExit(f"native smoke terminal surface missing: dark={dark_surface}")
+    min_text = 80 if mode == "nvim-skia" else 500
+    if terminal_text < min_text:
+        raise SystemExit(f"native smoke terminal text missing: text={terminal_text}")
+    if mode == "terminal" and len(sys.argv) > 3:
+        verify_native_smoke_result(sys.argv[3])
+
+    print(
+        f"native smoke verified: mode={mode} {width}x{height} blue={blue} "
+        f"dark_surface={dark_surface} terminal_text={terminal_text}"
+    )
+    return 0
+
+
+def verify_nvim_skia(width: int, height: int, pixels, result_path: str) -> None:
+    result = read_prefixed_result(result_path, "ok nvim-skia ")
+    geometry = parse_geometry(result)
+    marker = parse_named_cell(result, "marker-cell", "marker")
+    text_count = int(parse_result_field(result, "text"))
+    if text_count != 1:
+        raise SystemExit(f"nvim skia marker count mismatch: {text_count}")
+
+    content_x, _ = terminal_surface_origin(width, height, pixels)
+    origin_x = content_x + geometry["origin_x"]
+    origin_y = terminal_text_first_row_origin_y(height, pixels, geometry["cell_height"])
+    cell_width = geometry["cell_width"]
+    cell_height = geometry["cell_height"]
+    stats = cell_ink_stats(
+        pixels,
+        origin_x + marker["col"] * cell_width,
+        origin_y + marker["row"] * cell_height,
+        cell_width,
+        cell_height,
+    )
+    if not glyph_region_visible(stats, cell_width, cell_height, "marker"):
+        raise SystemExit(f"nvim skia marker glyph pixels missing: {stats}")
+
+    print(
+        "native nvim skia verified: "
+        f"{width}x{height} origin={origin_x},{origin_y} "
+        f"cell={cell_width}x{cell_height} marker={marker['row']}:{marker['col']} "
+        f"ink={stats['ink']}"
+    )
+
+
+def verify_native_smoke_result(result_path: str) -> None:
+    result = read_prefixed_result(result_path, "ok native-smoke ")
+    if parse_result_field(result, "skia-frames") != "yes":
+        raise SystemExit(f"native smoke did not use skia terminal renderer: {result}")
+
+
+def verify_shaped_text_visual(width: int, height: int, pixels, result_path: str) -> None:
+    if not result_path:
+        raise SystemExit("shaped text visual smoke missing result path")
+    result = read_result(result_path)
+    geometry = parse_geometry(result)
+    cells = parse_cells(result)
+    content_x, content_y = terminal_surface_origin(width, height, pixels)
+    origin_x = content_x + geometry["origin_x"]
+    origin_y = terminal_text_first_row_origin_y(height, pixels, geometry["cell_height"])
+    cell_width = geometry["cell_width"]
+    cell_height = geometry["cell_height"]
+
+    failures = []
+    for label in ("jp1", "jp2", "jp3", "nerd", "combining", "ambiguous"):
+        row, col = cells[label]
+        width_cells = 2 if label.startswith("jp") else 1
+        stats = cell_ink_stats(
+            pixels,
+            origin_x + col * cell_width,
+            origin_y + row * cell_height,
+            width_cells * cell_width,
+            cell_height,
+        )
+        if not glyph_region_visible(stats, cell_width, cell_height, label):
+            failures.append(f"{label}:{stats}")
+
+    if failures:
+        raise SystemExit("shaped text glyph pixels missing: " + "; ".join(failures))
+
+    print(
+        "native shaped text visual verified: "
+        f"{width}x{height} origin={origin_x},{origin_y} "
+        f"cell={cell_width}x{cell_height} labels={','.join(cells)}"
+    )
+
+
+def verify_cursor_switch(width: int, height: int, pixels, result_path: str) -> None:
+    if not result_path:
+        raise SystemExit("cursor switch smoke missing result path")
+    result = read_prefixed_result(result_path, "ok cursor-switch ")
+    geometry = parse_geometry(result)
+    old_row, old_col = parse_row_col_field(result, "old")
+    new_row, new_col = parse_row_col_field(result, "new")
+    content_x, _ = terminal_surface_origin(width, height, pixels)
+    origin_x = content_x + geometry["origin_x"]
+    origin_y = terminal_text_first_row_origin_y(height, pixels, geometry["cell_height"])
+    cell_width = geometry["cell_width"]
+    cell_height = geometry["cell_height"]
+
+    new_stats = cursor_cell_stats(
+        pixels,
+        origin_x + new_col * cell_width,
+        origin_y + new_row * cell_height,
+        cell_width,
+        cell_height,
+    )
+    old_stats = cursor_cell_stats(
+        pixels,
+        origin_x + old_col * cell_width,
+        origin_y + old_row * cell_height,
+        cell_width,
+        cell_height,
+    )
+    min_cursor_pixels = max(40, cell_width * cell_height // 4)
+    if new_stats["cursor"] < min_cursor_pixels:
+        raise SystemExit(f"new cursor body pixels missing: {new_stats}")
+    if old_stats["cursor"] > 8:
+        raise SystemExit(f"previous pane cursor/trail pixels remain: {old_stats}")
+
+    print(
+        "native cursor switch verified: "
+        f"{width}x{height} origin={origin_x},{origin_y} "
+        f"cell={cell_width}x{cell_height} new={new_row}:{new_col} old={old_row}:{old_col}"
+    )
+
+
+def verify_ui_surfaces(width: int, height: int, pixels, result_path: str) -> None:
+    if not result_path:
+        raise SystemExit("ui surfaces smoke missing result path")
+    result = read_prefixed_result(result_path, "ok ui-surfaces ")
+    geometry = parse_geometry(result)
+    blend = parse_blend_cell(result)
+    content_x, _ = terminal_surface_origin(width, height, pixels)
+    origin_x = content_x + geometry["origin_x"]
+    origin_y = terminal_text_first_row_origin_y(height, pixels, geometry["cell_height"])
+    cell_width = geometry["cell_width"]
+    cell_height = geometry["cell_height"]
+    stats = blended_cell_stats(
+        pixels,
+        origin_x + blend["col"] * cell_width,
+        origin_y + blend["row"] * cell_height,
+        cell_width,
+        cell_height,
+    )
+    expected = blended_rgb(blend["bg"], blend["base"], blend["amount"])
+    distance = color_distance(stats["average"], expected)
+    if distance > 28:
+        raise SystemExit(
+            "ui surface blended cell color mismatch: "
+            f"average={stats['average']} expected={expected} distance={distance:.1f}"
+        )
+
+    print(
+        "native ui surfaces verified: "
+        f"{width}x{height} origin={origin_x},{origin_y} "
+        f"cell={cell_width}x{cell_height} blend={blend['row']}:{blend['col']} "
+        f"average={stats['average']} expected={expected}"
+    )
+
+
+def verify_popupmenu(width: int, height: int, pixels, result_path: str) -> None:
+    if not result_path:
+        raise SystemExit("popupmenu smoke missing result path")
+    result = read_prefixed_result(result_path, "ok popupmenu ")
+    geometry = parse_geometry(result)
+    popup = parse_named_cell(result, "popup-cell", "popup")
+    content_x, _ = terminal_surface_origin(width, height, pixels)
+    origin_x = content_x + geometry["origin_x"]
+    origin_y = terminal_text_first_row_origin_y(height, pixels, geometry["cell_height"])
+    cell_width = geometry["cell_width"]
+    cell_height = geometry["cell_height"]
+    stats = cell_ink_stats(
+        pixels,
+        origin_x + popup["col"] * cell_width,
+        origin_y + popup["row"] * cell_height,
+        cell_width,
+        cell_height,
+    )
+    if not glyph_region_visible(stats, cell_width, cell_height, "popup"):
+        raise SystemExit(f"popupmenu glyph pixels missing: {stats}")
+
+    print(
+        "native popupmenu verified: "
+        f"{width}x{height} origin={origin_x},{origin_y} "
+        f"cell={cell_width}x{cell_height} popup={popup['row']}:{popup['col']} "
+        f"ink={stats['ink']}"
+    )
+
+
+def verify_cursor_shape(width: int, height: int, pixels, result_path: str) -> None:
+    if not result_path:
+        raise SystemExit("cursor shape smoke missing result path")
+    result = read_prefixed_result(result_path, "ok cursor-shape ")
+    geometry = parse_geometry(result)
+    cursor = parse_cursor_detail(result)
+    if cursor["style"] != "bar" or cursor["percentage"] != 25:
+        raise SystemExit(f"cursor shape result is not expected insert bar: {cursor}")
+    content_x, _ = terminal_surface_origin(width, height, pixels)
+    origin_x = content_x + geometry["origin_x"]
+    origin_y = terminal_text_first_row_origin_y(height, pixels, geometry["cell_height"])
+    cell_width = geometry["cell_width"]
+    cell_height = geometry["cell_height"]
+    stats = bar_cursor_stats(
+        pixels,
+        origin_x + cursor["col"] * cell_width,
+        origin_y + cursor["row"] * cell_height,
+        cell_width,
+        cell_height,
+        cursor["percentage"],
+    )
+    min_bar_pixels = max(20, stats["bar_width"] * cell_height // 8)
+    if stats["bar"] < min_bar_pixels:
+        raise SystemExit(f"bar cursor pixels missing: {stats}")
+    if stats["outside"] > 8:
+        raise SystemExit(f"bar cursor is too wide: {stats}")
+
+    print(
+        "native cursor shape verified: "
+        f"{width}x{height} origin={origin_x},{origin_y} "
+        f"cell={cell_width}x{cell_height} cursor={cursor['row']}:{cursor['col']} "
+        f"bar={stats['bar']} outside={stats['outside']}"
+    )
+
+
+def verify_cursor_normal_shape(width: int, height: int, pixels, result_path: str) -> None:
+    if not result_path:
+        raise SystemExit("cursor normal shape smoke missing result path")
+    result = read_prefixed_result(result_path, "ok cursor-normal-shape ")
+    geometry = parse_geometry(result)
+    cursor = parse_cursor_detail(result)
+    if cursor["style"] != "block":
+        raise SystemExit(f"cursor normal result is not expected block: {cursor}")
+    origin_x, origin_y, cell_width, cell_height = cursor_pixel_origin(
+        width,
+        height,
+        pixels,
+        geometry,
+    )
+    stats = cursor_cell_stats(
+        pixels,
+        origin_x + cursor["col"] * cell_width,
+        origin_y + cursor["row"] * cell_height,
+        cell_width,
+        cell_height,
+    )
+    min_cursor_pixels = max(40, cell_width * cell_height // 4)
+    if stats["cursor"] < min_cursor_pixels:
+        raise SystemExit(f"block cursor pixels missing: {stats}")
+
+    print(
+        "native cursor normal shape verified: "
+        f"{width}x{height} origin={origin_x},{origin_y} "
+        f"cell={cell_width}x{cell_height} cursor={cursor['row']}:{cursor['col']} "
+        f"pixels={stats['cursor']}"
+    )
+
+
+def verify_cursor_replace_shape(width: int, height: int, pixels, result_path: str) -> None:
+    if not result_path:
+        raise SystemExit("cursor replace shape smoke missing result path")
+    result = read_prefixed_result(result_path, "ok cursor-replace-shape ")
+    geometry = parse_geometry(result)
+    cursor = parse_cursor_detail(result)
+    if cursor["style"] != "underline" or cursor["percentage"] != 20:
+        raise SystemExit(f"cursor replace result is not expected underline: {cursor}")
+    origin_x, origin_y, cell_width, cell_height = cursor_pixel_origin(
+        width,
+        height,
+        pixels,
+        geometry,
+    )
+    stats = underline_cursor_stats(
+        pixels,
+        origin_x + cursor["col"] * cell_width,
+        origin_y + cursor["row"] * cell_height,
+        cell_width,
+        cell_height,
+        cursor["percentage"],
+    )
+    min_underline_pixels = max(20, cell_width * stats["underline_height"] // 4)
+    if stats["underline"] < min_underline_pixels:
+        raise SystemExit(f"underline cursor pixels missing: {stats}")
+    if stats["above"] > 8:
+        raise SystemExit(f"underline cursor is too tall: {stats}")
+
+    print(
+        "native cursor replace shape verified: "
+        f"{width}x{height} origin={origin_x},{origin_y} "
+        f"cell={cell_width}x{cell_height} cursor={cursor['row']}:{cursor['col']} "
+        f"underline={stats['underline']} above={stats['above']}"
+    )
+
+
+def verify_cursor_blink(width: int, height: int, pixels, result_path: str) -> None:
+    if not result_path:
+        raise SystemExit("cursor blink smoke missing result path")
+    result = read_prefixed_result(result_path, "ok cursor-blink ")
+    geometry = parse_geometry(result)
+    cursor = parse_cursor_detail(result)
+    if cursor["style"] != "bar" or cursor["blinkoff"] < 1000:
+        raise SystemExit(f"cursor blink result is not expected long off-phase bar: {cursor}")
+    content_x, _ = terminal_surface_origin(width, height, pixels)
+    origin_x = content_x + geometry["origin_x"]
+    origin_y = terminal_text_first_row_origin_y(height, pixels, geometry["cell_height"])
+    cell_width = geometry["cell_width"]
+    cell_height = geometry["cell_height"]
+    stats = bar_cursor_stats(
+        pixels,
+        origin_x + cursor["col"] * cell_width,
+        origin_y + cursor["row"] * cell_height,
+        cell_width,
+        cell_height,
+        cursor["percentage"],
+    )
+    if stats["bar"] > 8 or stats["outside"] > 8:
+        raise SystemExit(f"cursor should be hidden during blink off phase: {stats}")
+
+    print(
+        "native cursor blink verified: "
+        f"{width}x{height} origin={origin_x},{origin_y} "
+        f"cell={cell_width}x{cell_height} cursor={cursor['row']}:{cursor['col']} "
+        f"bar={stats['bar']} outside={stats['outside']}"
+    )
+
+
+def cursor_pixel_origin(width: int, height: int, pixels, geometry):
+    content_x, _ = terminal_surface_origin(width, height, pixels)
+    return (
+        content_x + geometry["origin_x"],
+        terminal_text_first_row_origin_y(height, pixels, geometry["cell_height"]),
+        geometry["cell_width"],
+        geometry["cell_height"],
+    )
+
+
+def read_result(path: str) -> str:
+    return read_prefixed_result(path, "ok shaped-text ")
+
+
+def read_prefixed_result(path: str, prefix: str) -> str:
+    with open(path, encoding="utf-8") as file:
+        result = file.read().strip()
+    if not result.startswith(prefix):
+        raise SystemExit(f"smoke did not pass: {result}")
+    return result
+
+
+def parse_geometry(result: str):
+    value = parse_result_field(result, "geometry")
+    parts = value.split(":")
+    if len(parts) != 4:
+        raise SystemExit(f"bad shaped text geometry: {value}")
+    origin_x, origin_y, cell_width, cell_height = (int(float(part)) for part in parts)
+    if cell_width <= 0 or cell_height <= 0:
+        raise SystemExit(f"bad shaped text cell size: {value}")
+    return {
+        "origin_x": origin_x,
+        "origin_y": origin_y,
+        "cell_width": cell_width,
+        "cell_height": cell_height,
+    }
+
+
+def parse_cells(result: str):
+    value = parse_result_field(result, "cells")
+    cells = {}
+    for entry in value.split(","):
+        parts = entry.split(":")
+        if len(parts) != 3:
+            raise SystemExit(f"bad shaped text cell entry: {entry}")
+        label, row, col = parts
+        cells[label] = (int(row), int(col))
+    expected = {"jp1", "jp2", "jp3", "nerd", "combining", "ambiguous"}
+    missing = expected - set(cells)
+    if missing:
+        raise SystemExit(f"shaped text cell metadata missing: {sorted(missing)}")
+    return cells
+
+
+def parse_row_col_field(result: str, name: str):
+    value = parse_result_field(result, name)
+    parts = value.split(":")
+    if len(parts) != 2:
+        raise SystemExit(f"bad row/col field {name}: {value}")
+    return int(parts[0]), int(parts[1])
+
+
+def parse_blend_cell(result: str):
+    value = parse_result_field(result, "blend-cell")
+    parts = value.split(":")
+    if len(parts) != 9:
+        raise SystemExit(f"bad blend cell field: {value}")
+    numbers = [int(part) for part in parts]
+    row, col, amount, bg_r, bg_g, bg_b, base_r, base_g, base_b = numbers
+    if not 0 <= amount <= 100:
+        raise SystemExit(f"bad blend amount: {amount}")
+    return {
+        "row": row,
+        "col": col,
+        "amount": amount,
+        "bg": (bg_r, bg_g, bg_b),
+        "base": (base_r, base_g, base_b),
+    }
+
+
+def parse_cursor_detail(result: str):
+    value = parse_result_field(result, "cursor")
+    parts = value.split(":")
+    if len(parts) != 7:
+        raise SystemExit(f"bad cursor detail field: {value}")
+    row, col, style, percentage, blinkwait, blinkon, blinkoff = parts
+    return {
+        "row": int(row),
+        "col": int(col),
+        "style": style,
+        "percentage": int(percentage),
+        "blinkwait": int(blinkwait),
+        "blinkon": int(blinkon),
+        "blinkoff": int(blinkoff),
+    }
+
+
+def parse_named_cell(result: str, field: str, expected_label: str):
+    value = parse_result_field(result, field)
+    parts = value.split(":")
+    if len(parts) != 3:
+        raise SystemExit(f"bad cell field {field}: {value}")
+    label, row, col = parts
+    if label != expected_label:
+        raise SystemExit(f"unexpected cell label for {field}: {label}")
+    return {"row": int(row), "col": int(col)}
+
+
+def parse_result_field(result: str, name: str) -> str:
+    prefix = f"{name}="
+    for field in result.split():
+        if field.startswith(prefix):
+            return field[len(prefix) :]
+    raise SystemExit(f"shaped text result missing {name}: {result}")
+
+
+def terminal_surface_origin(width: int, height: int, pixels):
+    dark_rows = []
+    for y in range(height):
+        dark = sum(1 for r, g, b, a in pixels[y] if is_terminal_background(r, g, b, a))
+        if dark > width * 0.55:
+            dark_rows.append(y)
+    dark_cols = []
+    for x in range(width):
+        dark = 0
+        for y in range(height):
+            r, g, b, a = pixels[y][x]
+            if is_terminal_background(r, g, b, a):
+                dark += 1
+        if dark > height * 0.35:
+            dark_cols.append(x)
+    if not dark_rows or not dark_cols:
+        raise SystemExit("could not locate terminal surface in shaped text screenshot")
+    return min(dark_cols), min(dark_rows)
+
+
+def terminal_text_first_row_origin_y(height: int, pixels, cell_height: int) -> int:
+    groups = bright_row_groups(height, pixels)
+    min_text_y = max(1, height // 10)
+    for start, _, _ in groups:
+        if start > min_text_y:
+            return max(0, start - cell_height // 4)
+    raise SystemExit("could not locate first terminal text row in shaped text screenshot")
+
+
+def bright_row_groups(height: int, pixels):
+    groups = []
+    start = None
+    previous = None
+    total = 0
+    for y in range(height):
+        count = sum(1 for r, g, b, a in pixels[y] if is_glyph_pixel(r, g, b, a))
+        if count <= 5:
+            continue
+        if start is None or y > previous + 1:
+            if start is not None:
+                groups.append((start, previous, total))
+            start = y
+            total = count
+        else:
+            total += count
+        previous = y
+    if start is not None:
+        groups.append((start, previous, total))
+    return groups
+
+
+def is_terminal_background(r: int, g: int, b: int, a: int) -> bool:
+    return a > 200 and r < 35 and g < 40 and b < 50
+
+
+def cell_ink_stats(pixels, x: int, y: int, width: int, height: int):
+    image_height = len(pixels)
+    image_width = len(pixels[0]) if image_height else 0
+    left = max(0, x)
+    top = max(0, y)
+    right = min(image_width, x + width)
+    bottom = min(image_height, y + height)
+    ink = 0
+    xs = []
+    ys = []
+    center_ink = 0
+    center_left = left + max(1, (right - left) // 4)
+    center_right = right - max(1, (right - left) // 4)
+    center_top = top + max(1, (bottom - top) // 4)
+    center_bottom = bottom - max(1, (bottom - top) // 4)
+    for yy in range(top, bottom):
+        for xx in range(left, right):
+            r, g, b, a = pixels[yy][xx]
+            if is_glyph_pixel(r, g, b, a):
+                ink += 1
+                xs.append(xx)
+                ys.append(yy)
+                if center_left <= xx < center_right and center_top <= yy < center_bottom:
+                    center_ink += 1
+    if not xs:
+        return {"ink": 0, "width": 0, "height": 0, "center": 0}
+    return {
+        "ink": ink,
+        "width": max(xs) - min(xs) + 1,
+        "height": max(ys) - min(ys) + 1,
+        "center": center_ink,
+    }
+
+
+def cursor_cell_stats(pixels, x: int, y: int, width: int, height: int):
+    image_height = len(pixels)
+    image_width = len(pixels[0]) if image_height else 0
+    left = max(0, x)
+    top = max(0, y)
+    right = min(image_width, x + width)
+    bottom = min(image_height, y + height)
+    cursor = 0
+    for yy in range(top, bottom):
+        for xx in range(left, right):
+            r, g, b, a = pixels[yy][xx]
+            if is_cursor_pixel(r, g, b, a):
+                cursor += 1
+    return {"cursor": cursor, "area": max(0, right - left) * max(0, bottom - top)}
+
+
+def blended_cell_stats(pixels, x: int, y: int, width: int, height: int):
+    image_height = len(pixels)
+    image_width = len(pixels[0]) if image_height else 0
+    inset_x = max(1, width // 4)
+    inset_y = max(1, height // 4)
+    left = max(0, x + inset_x)
+    top = max(0, y + inset_y)
+    right = min(image_width, x + width - inset_x)
+    bottom = min(image_height, y + height - inset_y)
+    if left >= right or top >= bottom:
+        raise SystemExit("blended cell sample region is empty")
+    red = green = blue = count = 0
+    for yy in range(top, bottom):
+        for xx in range(left, right):
+            r, g, b, _ = pixels[yy][xx]
+            red += r
+            green += g
+            blue += b
+            count += 1
+    return {"average": (red // count, green // count, blue // count), "count": count}
+
+
+def bar_cursor_stats(pixels, x: int, y: int, width: int, height: int, percentage: int):
+    image_height = len(pixels)
+    image_width = len(pixels[0]) if image_height else 0
+    bar_width = max(1, round(width * max(1, min(percentage, 100)) / 100))
+    left = max(0, x)
+    top = max(0, y)
+    right = min(image_width, x + width)
+    bottom = min(image_height, y + height)
+    bar_right = min(right, left + bar_width + 1)
+    outside_left = min(right, left + bar_width + 2)
+    bar = 0
+    outside = 0
+    for yy in range(top, bottom):
+        for xx in range(left, right):
+            r, g, b, a = pixels[yy][xx]
+            if not is_cursor_pixel(r, g, b, a):
+                continue
+            if xx < bar_right:
+                bar += 1
+            elif xx >= outside_left:
+                outside += 1
+    return {"bar": bar, "outside": outside, "bar_width": bar_width}
+
+
+def underline_cursor_stats(pixels, x: int, y: int, width: int, height: int, percentage: int):
+    image_height = len(pixels)
+    image_width = len(pixels[0]) if image_height else 0
+    underline_height = max(1, round(height * max(1, min(percentage, 100)) / 100))
+    left = max(0, x)
+    top = max(0, y)
+    right = min(image_width, x + width)
+    bottom = min(image_height, y + height)
+    underline_top = max(top, bottom - underline_height - 1)
+    above_bottom = max(top, bottom - underline_height - 2)
+    underline = 0
+    above = 0
+    for yy in range(top, bottom):
+        for xx in range(left, right):
+            r, g, b, a = pixels[yy][xx]
+            if not is_cursor_pixel(r, g, b, a):
+                continue
+            if yy >= underline_top:
+                underline += 1
+            elif yy < above_bottom:
+                above += 1
+    return {"underline": underline, "above": above, "underline_height": underline_height}
+
+
+def blended_rgb(background, base, blend: int):
+    alpha = (100 - blend) / 100.0
+    return tuple(round(background[index] * alpha + base[index] * (1.0 - alpha)) for index in range(3))
+
+
+def color_distance(left, right) -> float:
+    return sum((left[index] - right[index]) ** 2 for index in range(3)) ** 0.5
+
+
+def is_glyph_pixel(r: int, g: int, b: int, a: int) -> bool:
+    return a > 180 and r > 120 and g > 120 and b > 110
+
+
+def is_cursor_pixel(r: int, g: int, b: int, a: int) -> bool:
+    return a > 180 and r > 145 and g > 135 and b > 115 and r >= b + 10 and g >= b + 5
+
+
+def glyph_region_visible(stats, cell_width: int, cell_height: int, label: str) -> bool:
+    min_ink = 10
+    min_width = max(2, cell_width // 5)
+    min_height = max(4, cell_height // 4)
+    if label.startswith("jp"):
+        min_ink = 20
+        min_width = max(4, cell_width // 3)
+        min_height = max(6, cell_height // 3)
+    return (
+        stats["ink"] >= min_ink
+        and stats["width"] >= min_width
+        and stats["height"] >= min_height
+    )
+
+
+def read_png_rgba(path: str):
+    with open(path, "rb") as file:
+        data = file.read()
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise SystemExit("not a png")
+
+    pos = 8
+    width = height = bit_depth = color_type = None
+    compressed = bytearray()
+    while pos < len(data):
+        length = struct.unpack(">I", data[pos : pos + 4])[0]
+        chunk_type = data[pos + 4 : pos + 8]
+        chunk = data[pos + 8 : pos + 8 + length]
+        pos += 12 + length
+
+        if chunk_type == b"IHDR":
+            width, height, bit_depth, color_type = parse_ihdr(chunk)
+        elif chunk_type == b"IDAT":
+            compressed.extend(chunk)
+        elif chunk_type == b"IEND":
+            break
+
+    if bit_depth != 8 or color_type not in (2, 6):
+        raise SystemExit(f"unsupported png format: bit_depth={bit_depth} color_type={color_type}")
+
+    channels = 4 if color_type == 6 else 3
+    raw = zlib.decompress(bytes(compressed))
+    rows = unfilter_rows(raw, width, height, channels)
+    return width, height, to_rgba(rows, color_type)
+
+
+def parse_ihdr(chunk: bytes):
+    width, height = struct.unpack(">II", chunk[:8])
+    return width, height, chunk[8], chunk[9]
+
+
+def unfilter_rows(raw: bytes, width: int, height: int, channels: int):
+    stride = width * channels
+    rows = []
+    pos = 0
+    previous = [0] * stride
+    for _ in range(height):
+        filter_type = raw[pos]
+        pos += 1
+        row = list(raw[pos : pos + stride])
+        pos += stride
+        apply_filter(row, previous, channels, filter_type)
+        rows.append(row)
+        previous = row
+    return rows
+
+
+def apply_filter(row, previous, channels: int, filter_type: int) -> None:
+    for idx, value in enumerate(row):
+        left = row[idx - channels] if idx >= channels else 0
+        up = previous[idx]
+        up_left = previous[idx - channels] if idx >= channels else 0
+
+        if filter_type == 0:
+            delta = 0
+        elif filter_type == 1:
+            delta = left
+        elif filter_type == 2:
+            delta = up
+        elif filter_type == 3:
+            delta = (left + up) // 2
+        elif filter_type == 4:
+            delta = paeth(left, up, up_left)
+        else:
+            raise SystemExit(f"unsupported png filter: {filter_type}")
+
+        row[idx] = (value + delta) & 0xFF
+
+
+def paeth(left: int, up: int, up_left: int) -> int:
+    estimate = left + up - up_left
+    left_distance = abs(estimate - left)
+    up_distance = abs(estimate - up)
+    up_left_distance = abs(estimate - up_left)
+    if left_distance <= up_distance and left_distance <= up_left_distance:
+        return left
+    if up_distance <= up_left_distance:
+        return up
+    return up_left
+
+
+def to_rgba(rows, color_type: int):
+    pixels = []
+    for row in rows:
+        pixel_row = []
+        step = 4 if color_type == 6 else 3
+        for idx in range(0, len(row), step):
+            if color_type == 6:
+                pixel_row.append(tuple(row[idx : idx + 4]))
+            else:
+                pixel_row.append((*row[idx : idx + 3], 255))
+        pixels.append(pixel_row)
+    return pixels
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

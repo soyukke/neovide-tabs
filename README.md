@@ -1,7 +1,10 @@
 # neovide-tabs
 
-Experimental terminal renderer built around `libghostty-vt`, with Neovide-like
-scroll animation as a first-class part of the architecture.
+Experimental terminal built around a Rust terminal core, a Neovide-like
+renderer, and a native macOS AppKit/Metal shell. The default `just terminal`
+path builds the Rust core/runtime and launches the AppKit host. Terminal bytes
+flow through a PTY-backed `libghostty-vt` runtime, while the native host owns
+the macOS window, menu, tab UI, and keyboard handling.
 
 ## Run
 
@@ -28,10 +31,24 @@ just terminal
 
 ```sh
 just             # list recipes
-just terminal    # launch the terminal prototype
-just native-spike # build and run the AppKit/Metal spike
+just terminal    # build and launch the native AppKit terminal host
+just neovim      # build and launch the native Neovim UI pane
+just native-build # build the AppKit/Metal host without launching it
+just native-spike # compatibility alias for just terminal
+just native-smoke # launch the native host briefly and write a PNG smoke shot
+just terminal-vim-scroll-smoke # verify Vim-style terminal scroll animates in Skia
+just nvim-skia-smoke # screenshot smoke for the native Neovim Skia/Metal pane
+just nvim-smoke-all # run deterministic Neovim scroll/jump/pane/cmdline smokes
+just nvim-smoke-shaped-text-visual # verify shaped glyph pixels in a screenshot
+just nvim-smoke-ui-surfaces # verify split/float/message surfaces and float blend
+just nvim-smoke-popupmenu # verify popupmenu model and Skia pixels
+just nvim-smoke-cursor-normal-shape # verify normal-mode block cursor in Skia
+just nvim-smoke-cursor-shape # verify Neovim mode cursor shape in Skia
+just nvim-smoke-cursor-replace-shape # verify replace-mode horizontal cursor in Skia
+just nvim-smoke-cursor-blink # verify cursor blink off phase in Skia
+just nvim-smoke-cursor-switch # verify cursor body/trail cleanup after tab switch
 just kitty-smoke # emit a tiny Kitty protocol PNG
-just kitty-render-smoke # screenshot smoke test for Kitty PNG rendering
+just kitty-render-smoke # pending native Kitty renderer smoke test
 just adr         # list Architecture Decision Records
 just adr-new     # create a new ADR
 just check       # cargo check
@@ -61,8 +78,10 @@ once per clone to make Git use them. The pre-commit hook runs `just precommit`,
 which performs `cargo fmt -- --check`, Clippy with `-D warnings`, and
 `cargo test`.
 
-Native macOS shell exploration lives in [`spikes/macos-shell`](spikes/macos-shell).
-It is intentionally separate from the current `macroquad` prototype.
+Native macOS shell code lives in [`spikes/macos-shell`](spikes/macos-shell).
+It links the Rust core and PTY-backed terminal runtime through a small C ABI,
+owns the native window/menu/tab surface, and presents Rust Skia/Metal-rendered
+terminal and Neovim panes.
 
 ## Configuration
 
@@ -184,21 +203,27 @@ process explicitly declares its state.
 
 ## Current MVP
 
-- Spawns the user's shell in a real PTY.
+- Launches the native AppKit terminal host through `just terminal`.
+- Spawns the user's shell in a real PTY from the Rust runtime.
 - Feeds PTY output through `libghostty-vt`.
-- Renders `RenderState` rows/cells with `macroquad`.
+- Renders terminal and Neovim panes through the Rust Skia/Metal adapter.
 - Supports basic printable input, control keys, arrows, delete, home/end, and
   page up/down.
-- Smooths scrollback wheel movement with fractional row offsets.
-- Detects simple vertical row shifts between frames and animates them. This is
-  the first hook for Neovide-style output/TUI scrolling.
+- Keeps tab/session metadata in the Rust core and native tab/menu UI.
+- Animates cursor movement in the Rust Skia/Metal renderer with a
+  Neovide-style trail.
+- Scrolls `libghostty-vt` history from the native wheel event and animates the
+  retained terminal window through the Skia/Metal renderer.
+- Launches an experimental native Neovim UI pane through `just neovim`, backed
+  by `nvim --embed`, `ext_multigrid`, and a Rust editor/window compositor
+  instead of terminal cell diffing.
 
 ## Scroll Design
 
 `src/scroll.rs` owns the spring model. It is intentionally independent from the
 PTY, terminal emulator, and renderer.
 
-There are two scroll sources:
+There are two scroll sources targeted by the renderer:
 
 - History scroll: integer rows are applied to `libghostty-vt`; fractional rows
   are held in the renderer and settled back to a cell boundary after wheel idle.
@@ -206,15 +231,75 @@ There are two scroll sources:
   frames, the renderer starts from the old visual position and springs to the new
   one.
 
-The second path is approximate. A better version should use terminal mutation
-events or a libghostty-side scroll-region signal instead of row-string diffing.
+The native host keeps AppKit responsible for tabs, menus, input routing, and
+context menus. Cell drawing is owned by the Rust Skia/Metal adapter for both
+normal terminal panes and native Neovim panes.
+
+The native Neovim pane uses Neovim `ext_multigrid` redraw events to keep
+separate grids for editor windows, floating windows, messages, cmdline, and file
+tree panes. Rust now emits a Neovide-derived retained command batch from those
+events: `grid_line` produces `DrawLine`, `grid_scroll` produces `Scroll`, and
+`win_viewport` produces `Viewport`. Neovim scroll animation is driven by
+event-origin command hints instead of snapshot-diff guessing.
+
+The current renderer boundary also exposes `nvterm_nvim_renderer_model_json`.
+Schema version 1 returns the background, cursor, and retained windows with
+screen placement, window kind, z-order, hidden state, scroll animation position,
+and colored cell lines. That model is the intended input for the future
+Skia/Metal Neovim surface.
+
+`just terminal` and `just neovim` draw content from retained renderer models.
+The Rust Skia/Metal adapter wraps the current `MTKView` drawable, draws the
+retained terminal or Neovim windows, and owns cursor body/trail rendering. The
+AppKit overlay is limited to native UI such as tabs, menus, dialogs, and context
+menus.
+
+The Rust renderer model also carries viewport margins, scrollback line source,
+scroll position, and event-origin scroll hint metadata. The Skia/Metal adapter
+uses those fields to draw animated Neovim scrollback inside the scrollable inner
+region while fixed rows such as statusline-like margins stay outside the
+scrolling clip. The native nvim path reads those hints from
+`NeovideRendererModelSnapshot` and does not call `nvterm_nvim_frame_json`.
+
+Neovim text in the Skia/Metal path is shaped by a Neovide-derived Rust shaper
+instead of direct `Canvas::draw_str` cell drawing. The shaper uses `swash` to map
+grapheme clusters onto grid-cell positions, caches Skia `TextBlob`s with `lru`,
+loads `$NVTERM_FONT` as the primary face, falls back through Skia `FontMgr`
+character matching, and keeps bundled Neovide font assets as default and last
+resort faces. Cell style now carries bold, italic, underline, and strikethrough
+from Neovim highlights and terminal SGR state into the renderer; bold and italic
+participate in font fallback, while underline and strikethrough are drawn as
+grid-aligned decorations.
+`nvim-shaped-text-visual` captures the Skia/Metal surface and checks that the
+Japanese, Nerd Font, combining-mark, and ambiguous-width fixture cells contain
+visible glyph pixels at the retained-model coordinates.
+`nvim-smoke-cursor-switch` captures the Skia/Metal surface after switching tabs
+and checks that the active tab's cursor body is visible while the previous tab's
+cursor/trail and marker text are absent.
+The cursor shape smokes drive Neovim `mode_info_set` / `mode_change` through
+normal block, insert `ver25`, and replace `hor20` modes and check both the
+renderer model and captured pixels. `nvim-smoke-cursor-blink` verifies the
+Skia/Metal cursor body is hidden during the configured blink off phase without
+requiring continuous redraw.
+`nvim-smoke-ui-surfaces` also captures the Skia/Metal surface and verifies that
+floating-window highlight `blend` values become alpha-composited background
+pixels instead of opaque cells.
+`nvim-smoke-popupmenu` drives command-line completion through Neovim
+`ext_popupmenu`, then checks both the retained popupmenu model and captured
+Skia/Metal glyph pixels.
+
+`nvterm_nvim_frame_json` remains only as a compatibility/debug frame output.
+The smoke recipes require Skia frames; `native-smoke` also checks
+`skia-frames=yes`, so frame-only or AppKit-only fallbacks no longer pass the
+native smoke gate.
 
 ## Next Work
 
-- Replace `macroquad` text drawing with a real terminal renderer, likely wgpu or
-  Metal on macOS.
 - Add a proper key encoder from `libghostty-vt::key` instead of manual escape
   strings.
 - Add mouse reporting for alternate-screen apps.
-- Add tabs as separate PTY + `Terminal` + `RenderState` instances.
-- Improve scroll detection for scroll regions, alternate screen, and Neovim.
+- Expand the native Neovim pane compositor to cover more Neovide behavior:
+  externalized windows and mouse input.
+- Expand deterministic visual coverage for shaped Japanese text, Nerd Font
+  symbols, combining marks, ambiguous-width characters, and more Neovim UI
+  surface combinations in the Skia/Metal path.

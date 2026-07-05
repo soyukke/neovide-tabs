@@ -4,7 +4,7 @@ This directory stores Architecture Decision Records for neovide-tabs.
 
 ADRs are used for decisions that shape the long-term architecture, especially
 choices that are hard to reverse or that explain why the current prototype is
-allowed to differ from the target design.
+allowed to differ from the target design during a migration.
 
 ## Index
 
@@ -12,6 +12,9 @@ allowed to differ from the target design.
 - [0002: Target a native macOS shell with Rust terminal core and Metal renderer](0002-target-native-macos-shell-rust-core-metal-renderer.md)
 - [0003: Prioritize Kitty graphics protocol for inline images](0003-prioritize-kitty-graphics-protocol-for-inline-images.md)
 - [0004: Use a warning-free Rust lint gate](0004-use-clippy-warning-free-rust-gate.md)
+- [0005: Retire the macroquad frontend](0005-retire-macroquad-frontend.md)
+- [0006: Use Neovim multigrid for the native Neovim pane](0006-use-neovim-multigrid-for-native-neovim-pane.md)
+- [0007: Vendor Neovide rendering assets for native Neovim quality](0007-vendor-neovide-rendering-assets.md)
 
 ## Workflow
 
