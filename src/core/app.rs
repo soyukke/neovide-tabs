@@ -73,6 +73,19 @@ impl TerminalCore {
         Some(pane_id.0)
     }
 
+    pub fn close_pane(&mut self, pane_id: usize) -> bool {
+        let pane_id = PaneId(pane_id);
+        let Some(tab_index) = self.tabs.iter().position(|tab| tab.contains_pane(pane_id)) else {
+            return false;
+        };
+        if self.tabs[tab_index].pane_count() == 1 {
+            self.tabs.remove(tab_index);
+            self.select_neighbor_after_tab_close(tab_index);
+            return true;
+        }
+        self.tabs[tab_index].close_pane(pane_id)
+    }
+
     pub fn select_tab(&mut self, index: usize) -> bool {
         if index >= self.tabs.len() {
             return false;
@@ -159,6 +172,16 @@ impl TerminalCore {
             .unwrap_or(0)
             + 1;
     }
+
+    fn select_neighbor_after_tab_close(&mut self, closed_index: usize) {
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+        } else if closed_index < self.active_tab {
+            self.active_tab -= 1;
+        } else if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -208,6 +231,29 @@ impl TerminalCoreTab {
             });
             self.active_pane = pane_id;
         }
+    }
+
+    fn close_pane(&mut self, pane_id: PaneId) -> bool {
+        if self.pane_count() <= 1 || !self.contains_pane(pane_id) {
+            return false;
+        }
+        let Some(layout) = self.layout.clone().without_leaf(pane_id) else {
+            return false;
+        };
+        self.layout = layout;
+        self.panes.retain(|pane| pane.id != pane_id);
+        if self.active_pane == pane_id {
+            self.active_pane = self.layout.first_leaf().unwrap_or(self.panes[0].id);
+        }
+        true
+    }
+
+    fn contains_pane(&self, pane_id: PaneId) -> bool {
+        self.panes.iter().any(|pane| pane.id == pane_id)
+    }
+
+    fn pane_count(&self) -> usize {
+        self.panes.len()
     }
 
     fn snapshot(&self, index: usize) -> TerminalCoreTabSnapshot {
@@ -353,6 +399,32 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn closing_split_pane_collapses_layout_and_selects_remaining_pane() {
+        let mut core = TerminalCore::new();
+        assert_eq!(core.split_active(SplitAxis::Vertical), Some(2));
+
+        assert!(core.close_pane(2));
+        let snapshot = core.snapshot();
+
+        assert_eq!(snapshot.tabs[0].panes.len(), 1);
+        assert_eq!(snapshot.tabs[0].active_pane, 1);
+        assert_eq!(snapshot.tabs[0].layout, StoredPaneLayout::Leaf { pane: 1 });
+    }
+
+    #[test]
+    fn closing_last_pane_removes_tab_and_selects_neighbor() {
+        let mut core = TerminalCore::new();
+        assert_eq!(core.new_tab(), 1);
+
+        assert!(core.close_pane(2));
+        let snapshot = core.snapshot();
+
+        assert_eq!(snapshot.tabs.len(), 1);
+        assert_eq!(snapshot.active_tab, 0);
+        assert_eq!(snapshot.tabs[0].panes[0].id, 1);
     }
 
     #[test]

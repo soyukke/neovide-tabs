@@ -57,6 +57,11 @@ pub extern "C" fn nvterm_core_split_active(handle: *mut TerminalCore, axis: u32)
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn nvterm_core_close_pane(handle: *mut TerminalCore, pane_id: usize) -> u8 {
+    core_mut(handle).is_some_and(|core| core.close_pane(pane_id)) as u8
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn nvterm_core_select_tab(handle: *mut TerminalCore, index: usize) -> u8 {
     core_mut(handle).is_some_and(|core| core.select_tab(index)) as u8
 }
@@ -186,6 +191,14 @@ pub extern "C" fn nvterm_runtime_drain(handle: *mut NativeTerminalRuntime) -> u8
         return 0;
     };
     runtime.drain().unwrap_or(false) as u8
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_exited(handle: *mut NativeTerminalRuntime) -> u8 {
+    let Some(runtime) = runtime_mut(handle) else {
+        return 1;
+    };
+    runtime.is_exited() as u8
 }
 
 #[unsafe(no_mangle)]
