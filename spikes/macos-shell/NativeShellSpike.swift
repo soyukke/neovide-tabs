@@ -14,6 +14,9 @@ func nvterm_core_new_tab(_ handle: UnsafeMutableRawPointer?) -> Int
 @_silgen_name("nvterm_core_split_active")
 func nvterm_core_split_active(_ handle: UnsafeMutableRawPointer?, _ axis: UInt32) -> Int
 
+@_silgen_name("nvterm_core_close_pane")
+func nvterm_core_close_pane(_ handle: UnsafeMutableRawPointer?, _ paneId: Int) -> UInt8
+
 @_silgen_name("nvterm_core_select_tab")
 func nvterm_core_select_tab(_ handle: UnsafeMutableRawPointer?, _ index: Int) -> UInt8
 
@@ -66,6 +69,9 @@ func nvterm_runtime_write(
 
 @_silgen_name("nvterm_runtime_drain")
 func nvterm_runtime_drain(_ handle: UnsafeMutableRawPointer?) -> UInt8
+
+@_silgen_name("nvterm_runtime_exited")
+func nvterm_runtime_exited(_ handle: UnsafeMutableRawPointer?) -> UInt8
 
 @_silgen_name("nvterm_runtime_scroll")
 func nvterm_runtime_scroll(_ handle: UnsafeMutableRawPointer?, _ requestedRows: Int) -> Int
@@ -476,6 +482,10 @@ final class RustCore {
         _ = nvterm_core_split_active(handle, axis)
     }
 
+    func closePane(_ paneId: Int) -> Bool {
+        nvterm_core_close_pane(handle, paneId) != 0
+    }
+
     func selectTab(_ index: Int) -> Bool {
         nvterm_core_select_tab(handle, index) != 0
     }
@@ -579,7 +589,7 @@ final class RustTerminalPane: NativePane {
     }
 
     func isExited() -> Bool {
-        false
+        nvterm_runtime_exited(handle) != 0
     }
 
     func currentWorkingDirectory() -> String? {
@@ -3111,6 +3121,19 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         }
     }
 
+    func applyTerminalExitClosesTabSmokeScenario(resultPath: String) {
+        core.newTab()
+        syncFromCore()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            self?.writeToActivePane(Data("exit\r".utf8))
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.writeTerminalExitClosesTabSmokeResult(resultPath, retries: 16)
+        }
+    }
+
     func applyTerminalNvimHandoffSmokeScenario(resultPath: String) {
         writeToActivePane(Data("nvim\r".utf8))
 
@@ -3579,6 +3602,27 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             : "failed terminal-nvim-handoff mode=\(activePaneMode()) " +
                 "model-frames=\(modelFrames ? "yes" : "no") " +
                 "skia-frames=\(skiaFrames) text=\(textOk ? "yes" : "no")\n"
+        try? result.write(toFile: resultPath, atomically: true, encoding: .utf8)
+        NSApp.terminate(nil)
+    }
+
+    private func writeTerminalExitClosesTabSmokeResult(_ resultPath: String, retries: Int) {
+        drainTerminalPanes()
+        let snapshot = core.snapshot()
+        let tabs = snapshot?.tabs.count ?? 0
+        let activeTab = snapshot?.active_tab ?? -1
+        let ok = tabs == 1 && activeTab == 0 && activePaneMode() == .terminal
+        if !ok, retries > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.writeTerminalExitClosesTabSmokeResult(resultPath, retries: retries - 1)
+            }
+            return
+        }
+
+        let result = ok
+            ? "ok terminal-exit-closes-tab tabs=1 active=0\n"
+            : "failed terminal-exit-closes-tab tabs=\(tabs) active=\(activeTab) " +
+                "mode=\(activePaneMode())\n"
         try? result.write(toFile: resultPath, atomically: true, encoding: .utf8)
         NSApp.terminate(nil)
     }
@@ -4422,20 +4466,45 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     private func drainTerminalPanes() {
         var activePaneChanged = false
         var exitedNvimPanes: [Int] = []
+        var exitedTerminalPanes: [Int] = []
         for (paneId, pane) in terminalPanes {
             let changed = pane.drain()
             activePaneChanged = activePaneChanged || (changed && paneId == activePaneId)
             if pane.kind == .neovim && pane.isExited() {
                 exitedNvimPanes.append(paneId)
+            } else if pane.kind == .terminal && pane.isExited() {
+                exitedTerminalPanes.append(paneId)
             }
         }
         for paneId in exitedNvimPanes {
             replaceExitedNeovimPane(paneId)
             activePaneChanged = activePaneChanged || paneId == activePaneId
         }
+        if closeExitedTerminalPanes(exitedTerminalPanes) {
+            return
+        }
         if activePaneChanged {
             updateActiveFrame()
         }
+    }
+
+    private func closeExitedTerminalPanes(_ paneIds: [Int]) -> Bool {
+        var closed = false
+        for paneId in paneIds {
+            terminalPanes.removeValue(forKey: paneId)
+            commandBuffers.removeValue(forKey: paneId)
+            scrollRemainders.removeValue(forKey: paneId)
+            closed = core.closePane(paneId) || closed
+        }
+        guard closed else {
+            return false
+        }
+        guard let snapshot = core.snapshot(), !snapshot.tabs.isEmpty else {
+            NSApp.terminate(nil)
+            return true
+        }
+        syncFromCore()
+        return true
     }
 
     private func replaceExitedNeovimPane(_ paneId: Int) {
@@ -4603,6 +4672,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "terminal-bottom-input":
             if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
                 controller.applyTerminalBottomInputSmokeScenario(resultPath: path)
+            }
+        case "terminal-exit-closes-tab":
+            if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
+                controller.applyTerminalExitClosesTabSmokeScenario(resultPath: path)
             }
         case "terminal-nvim-handoff":
             if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {

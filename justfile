@@ -57,6 +57,10 @@ terminal-vim-scroll-smoke:
 terminal-bottom-input-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-bottom-input-smoke; else just native-build && ./scripts/native-terminal-bottom-input-smoke; fi
 
+# Verify shell exit closes its terminal tab.
+terminal-exit-closes-tab-smoke:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-exit-closes-tab-smoke; else just native-build && ./scripts/native-terminal-exit-closes-tab-smoke; fi
+
 # Verify typing nvim in a terminal pane hands off to native Neovim rendering.
 terminal-nvim-handoff-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-nvim-handoff-smoke; else just native-build && ./scripts/native-terminal-nvim-handoff-smoke; fi

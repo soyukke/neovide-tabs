@@ -52,6 +52,7 @@ pub struct NativeTerminalRuntime {
     renderer_model: TerminalRendererModel,
     size: TerminalGridSize,
     current_working_directory: Option<PathBuf>,
+    exited: bool,
 }
 
 impl NativeTerminalRuntime {
@@ -79,6 +80,7 @@ impl NativeTerminalRuntime {
             renderer_model: TerminalRendererModel::new(size),
             size,
             current_working_directory: env::current_dir().ok(),
+            exited: false,
         })
     }
 
@@ -114,7 +116,15 @@ impl NativeTerminalRuntime {
                 self.pty.write_all(&replies)?;
             }
         }
+        let was_exited = self.exited;
+        if self.refresh_exited() && !was_exited {
+            changed = true;
+        }
         Ok(changed)
+    }
+
+    pub fn is_exited(&mut self) -> bool {
+        self.refresh_exited()
     }
 
     pub fn scroll_delta(&mut self, requested_rows: isize) -> Result<isize> {
@@ -162,6 +172,11 @@ impl NativeTerminalRuntime {
         if let Some(path) = terminal_pwd_path(pwd) {
             self.current_working_directory = Some(path);
         }
+    }
+
+    fn refresh_exited(&mut self) -> bool {
+        self.exited = self.exited || self.pty.poll_exited();
+        self.exited
     }
 }
 
@@ -213,6 +228,14 @@ impl RuntimePty {
     fn kill(&mut self) -> Result<()> {
         self.child.kill()?;
         Ok(())
+    }
+
+    fn poll_exited(&mut self) -> bool {
+        match self.child.try_wait() {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(_) => true,
+        }
     }
 }
 
