@@ -183,6 +183,7 @@ private let maxFullFrameScrollAnimationRows = 24
 private let maxScrollRegionDetectionRows = 80
 private let minFullFrameScrollMatchRows = 4
 private let minTerminalVimScrollSmokePosition = 3.0
+private let maxTerminalBottomInputSmokePosition = 0.1
 private let minJumpAnimationContentRows = 8
 private let minScrollRegionContentRows = 2
 private let outputScrollAnimationFarLines = 1
@@ -2931,6 +2932,18 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         }
     }
 
+    func applyTerminalBottomInputSmokeScenario(resultPath: String) {
+        let command = [
+            "i=0",
+            "while [ $i -lt 80 ]; do printf '\\n'; i=$((i + 1)); done",
+        ].joined(separator: "; ")
+        writeToActivePane(Data("\(command)\r".utf8))
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            self?.waitForTerminalBottomInputIdleThenType(resultPath, retries: 24)
+        }
+    }
+
     func applyNvimScrollSmokeScenario(resultPath: String) {
         openNvimSmokeBuffer(
             path: "/tmp/neovide-tabs-nvim-scroll-smoke.txt",
@@ -3276,6 +3289,57 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
                 "count=\(skiaFrames) scroll-position=\(formattedPosition)\n"
             : "failed terminal-vim-scroll skia-frames=\(frameLabel) " +
                 "count=\(skiaFrames) scroll-position=\(formattedPosition)\n"
+        try? result.write(toFile: resultPath, atomically: true, encoding: .utf8)
+        NSApp.terminate(nil)
+    }
+
+    private func waitForTerminalBottomInputIdleThenType(_ resultPath: String, retries: Int) {
+        let scrollPosition = abs(activePaneRendererScrollPosition())
+        if scrollPosition > maxTerminalBottomInputSmokePosition, retries > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.waitForTerminalBottomInputIdleThenType(resultPath, retries: retries - 1)
+            }
+            return
+        }
+
+        metalView.resetSkiaFrameCount()
+        writeToActivePane(Data("abc".utf8))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.writeTerminalBottomInputSmokeResult(
+                resultPath,
+                retries: 12,
+                maxScrollPosition: 0
+            )
+        }
+    }
+
+    private func writeTerminalBottomInputSmokeResult(
+        _ resultPath: String,
+        retries: Int,
+        maxScrollPosition: Double
+    ) {
+        let skiaFrames = metalView.skiaFrames()
+        let scrollPosition = abs(activePaneRendererScrollPosition())
+        let observedScrollPosition = max(maxScrollPosition, scrollPosition)
+        let ok = skiaFrames > 0 &&
+            observedScrollPosition <= maxTerminalBottomInputSmokePosition
+        if !ok, retries > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.writeTerminalBottomInputSmokeResult(
+                    resultPath,
+                    retries: retries - 1,
+                    maxScrollPosition: observedScrollPosition
+                )
+            }
+            return
+        }
+
+        let formattedPosition = String(format: "%.2f", observedScrollPosition)
+        let result = ok
+            ? "ok terminal-bottom-input no-scroll skia-frames=\(skiaFrames) " +
+                "scroll-position=\(formattedPosition)\n"
+            : "failed terminal-bottom-input unexpected-scroll skia-frames=\(skiaFrames) " +
+                "scroll-position=\(formattedPosition)\n"
         try? result.write(toFile: resultPath, atomically: true, encoding: .utf8)
         NSApp.terminate(nil)
     }
@@ -4126,6 +4190,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "terminal-vim-scroll":
             if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
                 controller.applyTerminalVimScrollSmokeScenario(resultPath: path)
+            }
+        case "terminal-bottom-input":
+            if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
+                controller.applyTerminalBottomInputSmokeScenario(resultPath: path)
             }
         case "nvim-scroll":
             if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {

@@ -12,6 +12,7 @@ use anyhow::Result;
 use libghostty_vt::{
     RenderState, Terminal, TerminalOptions,
     render::{CellIteration, CellIterator, CursorVisualStyle, RowIteration, RowIterator, Snapshot},
+    screen::Screen,
     style::{RgbColor, Underline},
     terminal::ScrollViewport,
 };
@@ -238,6 +239,7 @@ struct TerminalFrameRenderer {
 struct TerminalRendererModel {
     window: NeovideRenderedWindowCache,
     pending_scroll_delta: isize,
+    last_scrollbar: Option<ScrollbarSnapshot>,
 }
 
 const MAX_TERMINAL_SCROLL_DETECTION_ROWS: usize = 80;
@@ -250,11 +252,13 @@ impl TerminalRendererModel {
         Self {
             window: NeovideRenderedWindowCache::new(size.cols as usize, size.rows as usize),
             pending_scroll_delta: 0,
+            last_scrollbar: None,
         }
     }
 
     fn resize(&mut self, size: TerminalGridSize) {
         self.apply_position(size.cols as usize, size.rows as usize);
+        self.last_scrollbar = None;
     }
 
     fn record_scroll_delta(&mut self, rows: isize) {
@@ -279,6 +283,7 @@ impl TerminalRendererModel {
         }
         self.apply_pending_scroll_delta();
         self.window.flush(1);
+        self.last_scrollbar = Some(frame.scrollbar.clone());
 
         NeovideRendererModelSnapshot {
             schema_version: 1,
@@ -341,8 +346,24 @@ impl TerminalRendererModel {
         if !scrollbar_is_at_bottom(&frame.scrollbar) {
             return None;
         }
+        if frame.active_screen == TerminalScreenSnapshot::Primary {
+            return self.infer_primary_output_scroll(frame);
+        }
         let previous = self.previous_rows(frame.rows.len())?;
         detect_terminal_output_scroll(&previous, &frame.rows)
+    }
+
+    fn infer_primary_output_scroll(&self, frame: &TerminalFrameSnapshot) -> Option<isize> {
+        let previous = self.last_scrollbar.as_ref()?;
+        if !scrollbar_is_at_bottom(previous) || frame.scrollbar.total <= previous.total {
+            return None;
+        }
+        let delta = frame.scrollbar.total - previous.total;
+        Some(cap_primary_output_scroll_rows(
+            delta,
+            frame.scrollbar.visible,
+        ))
+        .filter(|rows| *rows != 0)
     }
 
     fn previous_rows(&self, height: usize) -> Option<Vec<Vec<TerminalCellSnapshot>>> {
@@ -493,6 +514,18 @@ fn scroll_row_body(text: &str) -> String {
     text.chars().skip(8).collect()
 }
 
+fn cap_primary_output_scroll_rows(rows: u64, visible_rows: u64) -> isize {
+    if rows == 0 {
+        return 0;
+    }
+    let capped_rows = if visible_rows > 0 && rows > visible_rows {
+        1
+    } else {
+        rows.min(MAX_TERMINAL_SCROLL_ANIMATION_ROWS as u64)
+    };
+    capped_rows.min(isize::MAX as u64) as isize
+}
+
 impl TerminalFrameRenderer {
     fn new() -> Result<Self> {
         Ok(Self {
@@ -531,6 +564,7 @@ impl TerminalFrameRenderer {
                 visible: scrollbar.len,
                 total: scrollbar.total,
             },
+            active_screen: terminal.active_screen()?.into(),
         })
     }
 }
@@ -572,6 +606,23 @@ pub struct TerminalFrameSnapshot {
     pub cursor_color: TerminalColor,
     pub cursor: Option<TerminalCursorSnapshot>,
     pub scrollbar: ScrollbarSnapshot,
+    pub active_screen: TerminalScreenSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalScreenSnapshot {
+    Primary,
+    Alternate,
+}
+
+impl From<Screen> for TerminalScreenSnapshot {
+    fn from(screen: Screen) -> Self {
+        match screen {
+            Screen::Primary => Self::Primary,
+            Screen::Alternate => Self::Alternate,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -801,6 +852,7 @@ mod tests {
             .collect::<String>();
         assert!(text.starts_with("hello"));
         assert_eq!(frame.cursor.unwrap().x, 5);
+        assert_eq!(frame.active_screen, TerminalScreenSnapshot::Primary);
     }
 
     #[test]
@@ -874,11 +926,83 @@ mod tests {
         assert_eq!(window.lines[7].as_ref().unwrap().text, "vim status");
     }
 
+    #[test]
+    fn terminal_renderer_model_does_not_infer_primary_prompt_redraw() {
+        let mut model = TerminalRendererModel::new(grid_size(8, 16));
+        model.snapshot(&primary_frame_with_scrollbar(
+            vec![
+                row("00000001 alpha"),
+                row("00000002 beta"),
+                row("00000003 gamma"),
+                row("00000004 delta"),
+                row("00000005 epsilon"),
+                row("00000006 zeta"),
+                row("00000007 eta"),
+                row("prompt>"),
+            ],
+            8,
+            8,
+        ));
+
+        let snapshot = model.snapshot(&primary_frame_with_scrollbar(
+            vec![
+                row("00000002 beta"),
+                row("00000003 gamma"),
+                row("00000004 delta"),
+                row("00000005 epsilon"),
+                row("00000006 zeta"),
+                row("00000007 eta"),
+                row("prompt> a"),
+                row(""),
+            ],
+            8,
+            8,
+        ));
+
+        assert_eq!(snapshot.windows[0].scroll_position, 0.0);
+    }
+
+    #[test]
+    fn terminal_renderer_model_animates_primary_scrollback_growth() {
+        let mut model = TerminalRendererModel::new(grid_size(4, 16));
+        model.snapshot(&primary_frame_with_scrollbar(
+            vec![row("one"), row("two"), row("three"), row("prompt>")],
+            0,
+            4,
+        ));
+
+        let snapshot = model.snapshot(&primary_frame_with_scrollbar(
+            vec![row("three"), row("four"), row("five"), row("prompt>")],
+            2,
+            6,
+        ));
+
+        assert_eq!(snapshot.windows[0].scroll_position, -2.0);
+    }
+
     fn frame(lines: &[&str]) -> TerminalFrameSnapshot {
         frame_with_rows(lines.iter().map(|line| row(line)).collect())
     }
 
     fn frame_with_rows(rows: Vec<Vec<TerminalCellSnapshot>>) -> TerminalFrameSnapshot {
+        let visible = rows.len() as u64;
+        frame_with_screen_and_scrollbar(rows, TerminalScreenSnapshot::Alternate, 0, visible)
+    }
+
+    fn primary_frame_with_scrollbar(
+        rows: Vec<Vec<TerminalCellSnapshot>>,
+        top: u64,
+        total: u64,
+    ) -> TerminalFrameSnapshot {
+        frame_with_screen_and_scrollbar(rows, TerminalScreenSnapshot::Primary, top, total)
+    }
+
+    fn frame_with_screen_and_scrollbar(
+        rows: Vec<Vec<TerminalCellSnapshot>>,
+        active_screen: TerminalScreenSnapshot,
+        top: u64,
+        total: u64,
+    ) -> TerminalFrameSnapshot {
         let visible = rows.len() as u64;
         TerminalFrameSnapshot {
             rows,
@@ -898,10 +1022,11 @@ mod tests {
                 blinkoff_ms: 0,
             }),
             scrollbar: ScrollbarSnapshot {
-                top: 0,
+                top,
                 visible,
-                total: visible,
+                total,
             },
+            active_screen,
         }
     }
 

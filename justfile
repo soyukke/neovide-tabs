@@ -53,6 +53,10 @@ native-smoke:
 terminal-vim-scroll-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-vim-scroll-smoke; else just native-build && ./scripts/native-terminal-vim-scroll-smoke; fi
 
+# Verify bottom-line terminal input does not trigger synthetic scroll animation.
+terminal-bottom-input-smoke:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-bottom-input-smoke; else just native-build && ./scripts/native-terminal-bottom-input-smoke; fi
+
 # Capture the native Neovim Skia/Metal pane and verify it is nonblank.
 nvim-skia-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just nvim-skia-smoke; else just native-build && ./scripts/native-nvim-smoke; fi
