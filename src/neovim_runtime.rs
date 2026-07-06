@@ -1,6 +1,7 @@
 use std::{
     env,
     io::{BufReader, Write},
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
@@ -34,7 +35,11 @@ pub struct NativeNeovimRuntime {
 
 impl NativeNeovimRuntime {
     pub fn spawn(size: TerminalGridSize) -> Result<Self> {
-        let (process, rx) = NeovimProcess::spawn()?;
+        Self::spawn_in_directory(size, None)
+    }
+
+    pub fn spawn_in_directory(size: TerminalGridSize, cwd: Option<PathBuf>) -> Result<Self> {
+        let (process, rx) = NeovimProcess::spawn(cwd.as_deref())?;
         let mut runtime = Self {
             process,
             rx,
@@ -191,9 +196,10 @@ struct NeovimProcess {
 }
 
 impl NeovimProcess {
-    fn spawn() -> Result<(Self, Receiver<Value>)> {
+    fn spawn(cwd: Option<&Path>) -> Result<(Self, Receiver<Value>)> {
         let mut command = Command::new(nvim_command());
         configure_process_group(&mut command);
+        configure_working_directory(&mut command, cwd);
         let mut child = command
             .arg("--embed")
             .arg("--cmd")
@@ -251,6 +257,14 @@ fn configure_process_group(command: &mut Command) {
 
 #[cfg(not(unix))]
 fn configure_process_group(_command: &mut Command) {}
+
+fn configure_working_directory(command: &mut Command, cwd: Option<&Path>) {
+    let Some(cwd) = cwd else {
+        return;
+    };
+    command.current_dir(cwd);
+    command.env("PWD", cwd);
+}
 
 #[cfg(unix)]
 fn terminate_process_tree(child: &mut Child) {

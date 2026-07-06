@@ -61,6 +61,10 @@ terminal-bottom-input-smoke:
 terminal-nvim-handoff-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-nvim-handoff-smoke; else just native-build && ./scripts/native-terminal-nvim-handoff-smoke; fi
 
+# Verify handed-off Neovim inherits the terminal pane working directory.
+terminal-nvim-cwd-smoke:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-nvim-cwd-smoke; else just native-build && ./scripts/native-terminal-nvim-cwd-smoke; fi
+
 # Verify :qa from a handed-off native Neovim pane returns to terminal rendering.
 terminal-nvim-quit-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-nvim-quit-smoke; else just native-build && ./scripts/native-terminal-nvim-quit-smoke; fi
