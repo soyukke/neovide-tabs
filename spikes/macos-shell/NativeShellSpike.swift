@@ -112,6 +112,9 @@ func nvterm_nvim_command(
 @_silgen_name("nvterm_nvim_drain")
 func nvterm_nvim_drain(_ handle: UnsafeMutableRawPointer?) -> UInt8
 
+@_silgen_name("nvterm_nvim_exited")
+func nvterm_nvim_exited(_ handle: UnsafeMutableRawPointer?) -> UInt8
+
 @_silgen_name("nvterm_nvim_frame_json")
 func nvterm_nvim_frame_json(_ handle: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
 
@@ -497,6 +500,7 @@ protocol NativePane: AnyObject {
     func write(_ data: Data)
     func runCommand(_ command: String) -> Bool
     func drain() -> Bool
+    func isExited() -> Bool
     func scroll(rows: Int) -> Int
     func frame() -> TerminalFrameSnapshot?
     func rendererModel() -> NeovideRendererModelSnapshot?
@@ -559,6 +563,10 @@ final class RustTerminalPane: NativePane {
     @discardableResult
     func drain() -> Bool {
         nvterm_runtime_drain(handle) != 0
+    }
+
+    func isExited() -> Bool {
+        false
     }
 
     func scroll(rows: Int) -> Int {
@@ -642,6 +650,10 @@ final class RustNeovimPane: NativePane {
     @discardableResult
     func drain() -> Bool {
         nvterm_nvim_drain(handle) != 0
+    }
+
+    func isExited() -> Bool {
+        nvterm_nvim_exited(handle) != 0
     }
 
     func scroll(rows: Int) -> Int {
@@ -3067,6 +3079,18 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         }
     }
 
+    func applyTerminalNvimQuitSmokeScenario(resultPath: String) {
+        writeToActivePane(Data("nvim\r".utf8))
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.runNvimCommandOrWrite("qa!", fallback: Data())
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in
+            self?.waitForTerminalAfterNvimQuit(resultPath, retries: 20)
+        }
+    }
+
     func applyNvimScrollSmokeScenario(resultPath: String) {
         openNvimSmokeBuffer(
             path: "/tmp/neovide-tabs-nvim-scroll-smoke.txt",
@@ -3412,6 +3436,40 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
                 "count=\(skiaFrames) scroll-position=\(formattedPosition)\n"
             : "failed terminal-vim-scroll skia-frames=\(frameLabel) " +
                 "count=\(skiaFrames) scroll-position=\(formattedPosition)\n"
+        try? result.write(toFile: resultPath, atomically: true, encoding: .utf8)
+        NSApp.terminate(nil)
+    }
+
+    private func waitForTerminalAfterNvimQuit(_ resultPath: String, retries: Int) {
+        drainTerminalPanes()
+        if activePaneMode() != .terminal, retries > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.waitForTerminalAfterNvimQuit(resultPath, retries: retries - 1)
+            }
+            return
+        }
+
+        metalView.resetSkiaFrameCount()
+        writeToActivePane(Data("printf 'AFTERQA\\n'\r".utf8))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.writeTerminalNvimQuitSmokeResult(resultPath, retries: 8)
+        }
+    }
+
+    private func writeTerminalNvimQuitSmokeResult(_ resultPath: String, retries: Int) {
+        let modeOk = activePaneMode() == .terminal
+        let skiaFrames = metalView.skiaFrames()
+        let ok = modeOk && skiaFrames > 0
+        if !ok, retries > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.writeTerminalNvimQuitSmokeResult(resultPath, retries: retries - 1)
+            }
+            return
+        }
+
+        let result = ok
+            ? "ok terminal-nvim-quit mode=terminal skia-frames=\(skiaFrames)\n"
+            : "failed terminal-nvim-quit mode=\(activePaneMode()) skia-frames=\(skiaFrames)\n"
         try? result.write(toFile: resultPath, atomically: true, encoding: .utf8)
         NSApp.terminate(nil)
     }
@@ -4247,13 +4305,33 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
     private func drainTerminalPanes() {
         var activePaneChanged = false
+        var exitedNvimPanes: [Int] = []
         for (paneId, pane) in terminalPanes {
             let changed = pane.drain()
             activePaneChanged = activePaneChanged || (changed && paneId == activePaneId)
+            if pane.kind == .neovim && pane.isExited() {
+                exitedNvimPanes.append(paneId)
+            }
+        }
+        for paneId in exitedNvimPanes {
+            replaceExitedNeovimPane(paneId)
+            activePaneChanged = activePaneChanged || paneId == activePaneId
         }
         if activePaneChanged {
             updateActiveFrame()
         }
+    }
+
+    private func replaceExitedNeovimPane(_ paneId: Int) {
+        guard let pane = RustTerminalPane(grid: terminalTextView.terminalGridSize()) else {
+            terminalPanes.removeValue(forKey: paneId)
+            return
+        }
+        terminalPanes[paneId] = pane
+        commandBuffers[paneId] = TerminalInputCommandBuffer()
+        scrollRemainders[paneId] = 0
+        terminalTextView.resetScrollAnimation()
+        lastNvimModelScrollShift = nil
     }
 
     private func updateActiveFrame() {
@@ -4413,6 +4491,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "terminal-nvim-handoff":
             if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
                 controller.applyTerminalNvimHandoffSmokeScenario(resultPath: path)
+            }
+        case "terminal-nvim-quit":
+            if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
+                controller.applyTerminalNvimQuitSmokeScenario(resultPath: path)
             }
         case "nvim-scroll":
             if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {

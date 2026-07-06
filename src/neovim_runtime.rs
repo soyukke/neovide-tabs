@@ -7,6 +7,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(target_os = "macos")]
+use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -19,11 +21,15 @@ use crate::{
     terminal_runtime::TerminalGridSize,
 };
 
+#[cfg(target_os = "macos")]
+const F_SETNOSIGPIPE: libc::c_int = 73;
+
 pub struct NativeNeovimRuntime {
     process: NeovimProcess,
     rx: Receiver<Value>,
     next_msg_id: u64,
     editor: NeovimEditor,
+    exited: bool,
 }
 
 impl NativeNeovimRuntime {
@@ -34,6 +40,7 @@ impl NativeNeovimRuntime {
             rx,
             next_msg_id: 1,
             editor: NeovimEditor::new(size.cols, size.rows),
+            exited: false,
         };
         runtime.attach(size)?;
         Ok(runtime)
@@ -64,7 +71,15 @@ impl NativeNeovimRuntime {
         while let Ok(value) = self.rx.try_recv() {
             changed = self.handle_message(value) || changed;
         }
+        let was_exited = self.exited;
+        if self.refresh_exited() && !was_exited {
+            changed = true;
+        }
         Ok(changed)
+    }
+
+    pub fn is_exited(&mut self) -> bool {
+        self.refresh_exited()
     }
 
     pub fn frame(&mut self) -> Result<NeovimFrameSnapshot> {
@@ -101,6 +116,9 @@ impl NativeNeovimRuntime {
     }
 
     fn request(&mut self, method: &str, args: Vec<Value>) -> Result<()> {
+        if self.refresh_exited() {
+            return Ok(());
+        }
         let message = Value::Array(vec![
             0.into(),
             self.next_msg_id.into(),
@@ -108,9 +126,20 @@ impl NativeNeovimRuntime {
             Value::Array(args),
         ]);
         self.next_msg_id += 1;
-        write_value(&mut self.process.stdin, &message)?;
-        self.process.stdin.flush()?;
+        if let Err(error) = write_value(&mut self.process.stdin, &message) {
+            self.refresh_exited();
+            return Err(error.into());
+        }
+        if let Err(error) = self.process.stdin.flush() {
+            self.refresh_exited();
+            return Err(error.into());
+        }
         Ok(())
+    }
+
+    fn refresh_exited(&mut self) -> bool {
+        self.exited = self.exited || self.process.poll_exited();
+        self.exited
     }
 
     fn handle_message(&mut self, value: Value) -> bool {
@@ -179,6 +208,7 @@ impl NeovimProcess {
             .stdin
             .take()
             .ok_or_else(|| anyhow!("nvim stdin unavailable"))?;
+        disable_sigpipe(&stdin);
         let stdout = child
             .stdout
             .take()
@@ -195,6 +225,25 @@ impl Drop for NeovimProcess {
     }
 }
 
+impl NeovimProcess {
+    fn poll_exited(&mut self) -> bool {
+        match self.child.try_wait() {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(_) => true,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn disable_sigpipe(stdin: &ChildStdin) {
+    // SAFETY: fcntl only reads the file descriptor value and sets a Darwin pipe flag.
+    let _ = unsafe { libc::fcntl(stdin.as_raw_fd(), F_SETNOSIGPIPE, 1) };
+}
+
+#[cfg(not(target_os = "macos"))]
+fn disable_sigpipe(_stdin: &ChildStdin) {}
+
 #[cfg(unix)]
 fn configure_process_group(command: &mut Command) {
     command.process_group(0);
@@ -205,6 +254,9 @@ fn configure_process_group(_command: &mut Command) {}
 
 #[cfg(unix)]
 fn terminate_process_tree(child: &mut Child) {
+    if wait_for_child_exit(child) {
+        return;
+    }
     let Ok(pid) = i32::try_from(child.id()) else {
         let _ = child.kill();
         return;

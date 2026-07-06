@@ -316,6 +316,14 @@ pub extern "C" fn nvterm_nvim_drain(handle: *mut NativeNeovimRuntime) -> u8 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn nvterm_nvim_exited(handle: *mut NativeNeovimRuntime) -> u8 {
+    let Some(runtime) = nvim_mut(handle) else {
+        return 1;
+    };
+    runtime.is_exited() as u8
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn nvterm_nvim_frame_json(handle: *mut NativeNeovimRuntime) -> *mut c_char {
     let Some(runtime) = nvim_mut(handle) else {
         return ptr::null_mut();
