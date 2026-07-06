@@ -491,6 +491,8 @@ final class RustCore {
 }
 
 protocol NativePane: AnyObject {
+    var kind: NativePaneMode { get }
+
     func resize(grid: (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int))
     func write(_ data: Data)
     func runCommand(_ command: String) -> Bool
@@ -512,6 +514,7 @@ enum NativePaneMode {
 }
 
 final class RustTerminalPane: NativePane {
+    let kind = NativePaneMode.terminal
     private let handle: UnsafeMutableRawPointer
 
     init?(grid: (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int)) {
@@ -592,6 +595,7 @@ final class RustTerminalPane: NativePane {
 }
 
 final class RustNeovimPane: NativePane {
+    let kind = NativePaneMode.neovim
     private let handle: UnsafeMutableRawPointer
 
     init?(grid: (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int)) {
@@ -671,6 +675,108 @@ final class RustNeovimPane: NativePane {
         let json = String(cString: pointer)
         return try? JSONDecoder().decode(T.self, from: Data(json.utf8))
     }
+}
+
+struct NeovimLaunchRequest {
+    let file: String?
+}
+
+struct TerminalInputCommandBuffer {
+    private(set) var command = ""
+
+    mutating func observe(_ data: Data) -> NeovimLaunchRequest? {
+        var request: NeovimLaunchRequest?
+        for byte in data {
+            if let next = observe(byte) {
+                request = next
+            }
+        }
+        return request
+    }
+
+    private mutating func observe(_ byte: UInt8) -> NeovimLaunchRequest? {
+        switch byte {
+        case 3, 21:
+            command.removeAll()
+            return nil
+        case 8, 127:
+            if !command.isEmpty {
+                command.removeLast()
+            }
+            return nil
+        case 10, 13:
+            defer {
+                command.removeAll()
+            }
+            return parseNeovimLaunch(command)
+        case 32...126:
+            command.append(Character(UnicodeScalar(byte)))
+            return nil
+        default:
+            return nil
+        }
+    }
+}
+
+private func parseNeovimLaunch(_ command: String) -> NeovimLaunchRequest? {
+    let tokens = shellLikeTokens(command.trimmingCharacters(in: .whitespacesAndNewlines))
+    guard let executable = tokens.first,
+          neovimExecutableNames.contains((executable as NSString).lastPathComponent)
+    else {
+        return nil
+    }
+
+    return NeovimLaunchRequest(file: tokens.dropFirst().first(where: neovimFileArgument))
+}
+
+private let neovimExecutableNames = ["nvim", "vim"]
+
+private func neovimFileArgument(_ token: String) -> Bool {
+    !token.isEmpty && !token.hasPrefix("-") && !token.hasPrefix("+")
+}
+
+private func shellLikeTokens(_ value: String) -> [String] {
+    var tokens: [String] = []
+    var current = ""
+    var quote: Character?
+    var escaping = false
+
+    for character in value {
+        if escaping {
+            current.append(character)
+            escaping = false
+            continue
+        }
+        if character == "\\" {
+            escaping = true
+            continue
+        }
+        if let activeQuote = quote {
+            if character == activeQuote {
+                quote = nil
+            } else {
+                current.append(character)
+            }
+            continue
+        }
+        if character == "'" || character == "\"" {
+            quote = character
+            continue
+        }
+        if character.isWhitespace {
+            if !current.isEmpty {
+                tokens.append(current)
+                current.removeAll()
+            }
+            continue
+        }
+        current.append(character)
+    }
+
+    if !current.isEmpty {
+        tokens.append(current)
+    }
+    return tokens
 }
 
 final class RenameTextField: NSTextField, NSTextFieldDelegate {
@@ -2693,8 +2799,9 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     private let tabControl = NSSegmentedControl(frame: .zero)
     private let metalView: TerminalMetalView
     private let terminalTextView = TerminalTextView(frame: .zero)
-    private let paneMode = NativePaneMode.current()
+    private let defaultPaneMode = NativePaneMode.current()
     private var terminalPanes: [Int: NativePane] = [:]
+    private var commandBuffers: [Int: TerminalInputCommandBuffer] = [:]
     private var scrollRemainders: [Int: CGFloat] = [:]
     private var activePaneId: Int?
     private var lastSnapshot: TerminalCoreSnapshot?
@@ -2941,6 +3048,22 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             self?.waitForTerminalBottomInputIdleThenType(resultPath, retries: 24)
+        }
+    }
+
+    func applyTerminalNvimHandoffSmokeScenario(resultPath: String) {
+        writeToActivePane(Data("nvim\r".utf8))
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.runNvimCommandOrWrite(
+                "enew | call setline(1, 'HANDOFFNVIM') | call cursor(1, 1)",
+                fallback: Data()
+            )
+            self?.metalView.resetSkiaFrameCount()
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in
+            self?.writeTerminalNvimHandoffSmokeResult(resultPath, retries: 16)
         }
     }
 
@@ -3289,6 +3412,29 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
                 "count=\(skiaFrames) scroll-position=\(formattedPosition)\n"
             : "failed terminal-vim-scroll skia-frames=\(frameLabel) " +
                 "count=\(skiaFrames) scroll-position=\(formattedPosition)\n"
+        try? result.write(toFile: resultPath, atomically: true, encoding: .utf8)
+        NSApp.terminate(nil)
+    }
+
+    private func writeTerminalNvimHandoffSmokeResult(_ resultPath: String, retries: Int) {
+        let modeOk = activePaneMode() == .neovim
+        let modelFrames = terminalTextView.hasRendererModelFrames()
+        let skiaFrames = metalView.skiaFrames()
+        let textOk = terminalTextView.rendererModelContainsTexts(["HANDOFFNVIM"])
+        let ok = modeOk && modelFrames && skiaFrames > 0 && textOk
+        if !ok, retries > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.writeTerminalNvimHandoffSmokeResult(resultPath, retries: retries - 1)
+            }
+            return
+        }
+
+        let result = ok
+            ? "ok terminal-nvim-handoff mode=neovim model-frames=yes " +
+                "skia-frames=\(skiaFrames) text=yes\n"
+            : "failed terminal-nvim-handoff mode=\(activePaneMode()) " +
+                "model-frames=\(modelFrames ? "yes" : "no") " +
+                "skia-frames=\(skiaFrames) text=\(textOk ? "yes" : "no")\n"
         try? result.write(toFile: resultPath, atomically: true, encoding: .utf8)
         NSApp.terminate(nil)
     }
@@ -3716,7 +3862,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
     private func openNvimSmokeBuffer(path: String, terminalCommand: String) {
         writeSmokeLines(path: path)
-        switch paneMode {
+        switch activePaneMode() {
         case .terminal:
             let command = [
                 "tmp=\(path)",
@@ -3734,7 +3880,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
     private func openNvimShapedTextSmokeBuffer(path: String, terminalCommand: String) {
         writeShapedTextSmokeLines(path: path)
-        switch paneMode {
+        switch activePaneMode() {
         case .terminal:
             let command = [
                 "tmp=\(path)",
@@ -3785,7 +3931,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     private func clearSmokeScrollShift() {
-        if paneMode == .neovim {
+        if activePaneMode() == .neovim {
             lastNvimModelScrollShift = nil
             return
         }
@@ -3793,7 +3939,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     private func consumeSmokeScrollShift() -> OutputScrollShift? {
-        if paneMode == .neovim {
+        if activePaneMode() == .neovim {
             defer {
                 lastNvimModelScrollShift = nil
             }
@@ -3803,7 +3949,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     private func peekSmokeScrollShift() -> OutputScrollShift? {
-        if paneMode == .neovim {
+        if activePaneMode() == .neovim {
             return lastNvimModelScrollShift
         }
         return terminalTextView.peekLastScrollRegionShift()
@@ -3826,10 +3972,12 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
     @discardableResult
     private func runNvimCommand(_ command: String) -> Bool {
-        guard paneMode == .neovim,
-              let paneId = activePaneId,
+        guard let paneId = activePaneId,
               let pane = terminalPanes[paneId]
         else {
+            return false
+        }
+        guard pane.kind == .neovim else {
             return false
         }
         let ok = pane.runCommand(command)
@@ -3945,6 +4093,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         if activePaneId != paneId {
             terminalTextView.resetScrollAnimation()
             lastNvimModelScrollShift = nil
+            commandBuffers[paneId] = TerminalInputCommandBuffer()
         }
         activePaneId = paneId
         _ = terminalPane(for: paneId)
@@ -3970,7 +4119,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     private func makePane(
         grid: (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int)
     ) -> NativePane? {
-        switch paneMode {
+        switch defaultPaneMode {
         case .terminal:
             return RustTerminalPane(grid: grid)
         case .neovim:
@@ -3992,8 +4141,56 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         else {
             return
         }
+        if handoffTerminalNeovimInput(data, paneId: paneId, pane: pane) {
+            return
+        }
         pane.write(data)
         drainTerminalPanes()
+    }
+
+    private func handoffTerminalNeovimInput(
+        _ data: Data,
+        paneId: Int,
+        pane: NativePane
+    ) -> Bool {
+        guard pane.kind == .terminal else {
+            return false
+        }
+        var buffer = commandBuffers[paneId] ?? TerminalInputCommandBuffer()
+        let request = buffer.observe(data)
+        commandBuffers[paneId] = buffer
+        guard let request else {
+            return false
+        }
+
+        pane.write(Data([0x15]))
+        _ = pane.drain()
+        guard switchTerminalPaneToNeovim(paneId: paneId, request: request) else {
+            pane.write(data)
+            drainTerminalPanes()
+            return true
+        }
+        return true
+    }
+
+    private func switchTerminalPaneToNeovim(
+        paneId: Int,
+        request: NeovimLaunchRequest
+    ) -> Bool {
+        guard let pane = RustNeovimPane(grid: terminalTextView.terminalGridSize()) else {
+            return false
+        }
+        terminalPanes[paneId] = pane
+        commandBuffers[paneId] = TerminalInputCommandBuffer()
+        scrollRemainders[paneId] = 0
+        terminalTextView.resetScrollAnimation()
+        lastNvimModelScrollShift = nil
+        if let file = request.file {
+            _ = pane.runCommand(neovimEditCommand(file))
+        }
+        drainTerminalPanes()
+        updateActiveFrame()
+        return true
     }
 
     private func scrollActivePane(deltaRows: CGFloat) {
@@ -4024,6 +4221,23 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         return wholeRows
     }
 
+    private func activePaneMode() -> NativePaneMode {
+        guard let paneId = activePaneId,
+              let pane = terminalPanes[paneId]
+        else {
+            return defaultPaneMode
+        }
+        return pane.kind
+    }
+
+    private func neovimEditCommand(_ file: String) -> String {
+        "execute 'edit' fnameescape('\(vimSingleQuoted(file))')"
+    }
+
+    private func vimSingleQuoted(_ value: String) -> String {
+        value.replacingOccurrences(of: "'", with: "''")
+    }
+
     private func startFrameTimer() {
         frameTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             self?.drainTerminalPanes()
@@ -4050,7 +4264,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             return
         }
 
-        if paneMode == .neovim, let model = pane.rendererModel() {
+        if pane.kind == .neovim, let model = pane.rendererModel() {
             if let scrollHint = model.scroll_hint {
                 lastNvimModelScrollShift = scrollHint.outputShift
             }
@@ -4075,7 +4289,8 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         }
 
         let geometry = terminalTextView.skiaRenderGeometry()
-        if paneMode == .terminal {
+        let pane = terminalPanes[paneId]
+        if pane?.kind == .terminal {
             return nvterm_skia_metal_render_terminal(
                 renderer,
                 renderHandle,
@@ -4194,6 +4409,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "terminal-bottom-input":
             if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
                 controller.applyTerminalBottomInputSmokeScenario(resultPath: path)
+            }
+        case "terminal-nvim-handoff":
+            if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
+                controller.applyTerminalNvimHandoffSmokeScenario(resultPath: path)
             }
         case "nvim-scroll":
             if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {

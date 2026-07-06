@@ -57,6 +57,10 @@ terminal-vim-scroll-smoke:
 terminal-bottom-input-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-bottom-input-smoke; else just native-build && ./scripts/native-terminal-bottom-input-smoke; fi
 
+# Verify typing nvim in a terminal pane hands off to native Neovim rendering.
+terminal-nvim-handoff-smoke:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-nvim-handoff-smoke; else just native-build && ./scripts/native-terminal-nvim-handoff-smoke; fi
+
 # Capture the native Neovim Skia/Metal pane and verify it is nonblank.
 nvim-skia-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just nvim-skia-smoke; else just native-build && ./scripts/native-nvim-smoke; fi
