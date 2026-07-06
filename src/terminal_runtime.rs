@@ -2,6 +2,7 @@ use std::{
     cell::RefCell,
     env,
     io::{Read, Write},
+    path::PathBuf,
     process::Command,
     rc::Rc,
     sync::mpsc::{self, Receiver},
@@ -50,6 +51,7 @@ pub struct NativeTerminalRuntime {
     renderer: TerminalFrameRenderer,
     renderer_model: TerminalRendererModel,
     size: TerminalGridSize,
+    current_working_directory: Option<PathBuf>,
 }
 
 impl NativeTerminalRuntime {
@@ -76,6 +78,7 @@ impl NativeTerminalRuntime {
             renderer: TerminalFrameRenderer::new()?,
             renderer_model: TerminalRendererModel::new(size),
             size,
+            current_working_directory: env::current_dir().ok(),
         })
     }
 
@@ -103,6 +106,7 @@ impl NativeTerminalRuntime {
         let mut changed = false;
         while let Ok(bytes) = self.pty.rx.try_recv() {
             self.terminal.vt_write(&bytes);
+            self.update_working_directory_from_terminal();
             changed = true;
 
             if !self.pty_replies.borrow().is_empty() {
@@ -145,6 +149,19 @@ impl NativeTerminalRuntime {
 
     pub fn renderer_scroll_position(&self) -> f32 {
         self.renderer_model.scroll_position()
+    }
+
+    pub fn current_working_directory(&self) -> Option<PathBuf> {
+        self.current_working_directory.clone()
+    }
+
+    fn update_working_directory_from_terminal(&mut self) {
+        let Ok(pwd) = self.terminal.pwd() else {
+            return;
+        };
+        if let Some(path) = terminal_pwd_path(pwd) {
+            self.current_working_directory = Some(path);
+        }
     }
 }
 
@@ -228,6 +245,48 @@ fn configure_shell_command(cmd: &mut CommandBuilder) {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("NVTERM_PROTO", "libghostty-vt");
+}
+
+fn terminal_pwd_path(pwd: &str) -> Option<PathBuf> {
+    let pwd = pwd.trim();
+    if pwd.is_empty() {
+        return None;
+    }
+    let path = if let Some(rest) = pwd.strip_prefix("file://") {
+        rest.find('/').map(|index| &rest[index..])?
+    } else if pwd.starts_with('/') {
+        pwd
+    } else {
+        return None;
+    };
+    percent_decode_path(path).map(PathBuf::from)
+}
+
+fn percent_decode_path(path: &str) -> Option<String> {
+    let mut output = Vec::with_capacity(path.len());
+    let bytes = path.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            output.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let hi = hex_value(*bytes.get(index + 1)?)?;
+        let lo = hex_value(*bytes.get(index + 2)?)?;
+        output.push((hi << 4) | lo);
+        index += 3;
+    }
+    String::from_utf8(output).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 struct TerminalFrameRenderer {
@@ -853,6 +912,28 @@ mod tests {
         assert!(text.starts_with("hello"));
         assert_eq!(frame.cursor.unwrap().x, 5);
         assert_eq!(frame.active_screen, TerminalScreenSnapshot::Primary);
+    }
+
+    #[test]
+    fn terminal_pwd_path_decodes_osc7_file_uri() {
+        assert_eq!(
+            terminal_pwd_path("file://localhost/Users/soyukke/dev%20app").unwrap(),
+            PathBuf::from("/Users/soyukke/dev app")
+        );
+        assert_eq!(
+            terminal_pwd_path("file:///tmp/neovide-tabs").unwrap(),
+            PathBuf::from("/tmp/neovide-tabs")
+        );
+    }
+
+    #[test]
+    fn terminal_pwd_path_accepts_bare_absolute_path() {
+        assert_eq!(
+            terminal_pwd_path("/Users/soyukke/dev/app").unwrap(),
+            PathBuf::from("/Users/soyukke/dev/app")
+        );
+        assert_eq!(terminal_pwd_path("relative/path"), None);
+        assert_eq!(terminal_pwd_path("file://localhost/tmp/%XX"), None);
     }
 
     #[test]

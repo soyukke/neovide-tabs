@@ -76,12 +76,24 @@ func nvterm_runtime_frame_json(_ handle: UnsafeMutableRawPointer?) -> UnsafeMuta
 @_silgen_name("nvterm_runtime_renderer_scroll_position")
 func nvterm_runtime_renderer_scroll_position(_ handle: UnsafeMutableRawPointer?) -> Float
 
+@_silgen_name("nvterm_runtime_cwd")
+func nvterm_runtime_cwd(_ handle: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
+
 @_silgen_name("nvterm_nvim_create")
 func nvterm_nvim_create(
     _ rows: UInt16,
     _ cols: UInt16,
     _ pixelWidth: UInt16,
     _ pixelHeight: UInt16
+) -> UnsafeMutableRawPointer?
+
+@_silgen_name("nvterm_nvim_create_in_cwd")
+func nvterm_nvim_create_in_cwd(
+    _ rows: UInt16,
+    _ cols: UInt16,
+    _ pixelWidth: UInt16,
+    _ pixelHeight: UInt16,
+    _ cwd: UnsafePointer<CChar>?
 ) -> UnsafeMutableRawPointer?
 
 @_silgen_name("nvterm_nvim_destroy")
@@ -501,6 +513,7 @@ protocol NativePane: AnyObject {
     func runCommand(_ command: String) -> Bool
     func drain() -> Bool
     func isExited() -> Bool
+    func currentWorkingDirectory() -> String?
     func scroll(rows: Int) -> Int
     func frame() -> TerminalFrameSnapshot?
     func rendererModel() -> NeovideRendererModelSnapshot?
@@ -569,6 +582,18 @@ final class RustTerminalPane: NativePane {
         false
     }
 
+    func currentWorkingDirectory() -> String? {
+        guard let pointer = nvterm_runtime_cwd(handle) else {
+            return nil
+        }
+        defer {
+            nvterm_string_free(pointer)
+        }
+
+        let value = String(cString: pointer)
+        return value.isEmpty ? nil : value
+    }
+
     func scroll(rows: Int) -> Int {
         nvterm_runtime_scroll(handle, rows)
     }
@@ -606,13 +631,24 @@ final class RustNeovimPane: NativePane {
     let kind = NativePaneMode.neovim
     private let handle: UnsafeMutableRawPointer
 
-    init?(grid: (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int)) {
-        guard let handle = nvterm_nvim_create(
+    init?(grid: (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int), cwd: String? = nil) {
+        let handle = cwd.flatMap { directory in
+            directory.withCString { value in
+                nvterm_nvim_create_in_cwd(
+                    clampedUInt16(grid.rows),
+                    clampedUInt16(grid.cols),
+                    clampedUInt16(grid.widthPixels),
+                    clampedUInt16(grid.heightPixels),
+                    value
+                )
+            }
+        } ?? nvterm_nvim_create(
             clampedUInt16(grid.rows),
             clampedUInt16(grid.cols),
             clampedUInt16(grid.widthPixels),
             clampedUInt16(grid.heightPixels)
-        ) else {
+        )
+        guard let handle = handle else {
             return nil
         }
         self.handle = handle
@@ -654,6 +690,10 @@ final class RustNeovimPane: NativePane {
 
     func isExited() -> Bool {
         nvterm_nvim_exited(handle) != 0
+    }
+
+    func currentWorkingDirectory() -> String? {
+        nil
     }
 
     func scroll(rows: Int) -> Int {
@@ -789,6 +829,14 @@ private func shellLikeTokens(_ value: String) -> [String] {
         tokens.append(current)
     }
     return tokens
+}
+
+private func shellQuote(_ value: String) -> String {
+    "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+}
+
+private func vimSingleQuote(_ value: String) -> String {
+    value.replacingOccurrences(of: "'", with: "''")
 }
 
 final class RenameTextField: NSTextField, NSTextFieldDelegate {
@@ -3079,6 +3127,44 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         }
     }
 
+    func applyTerminalNvimCwdSmokeScenario(resultPath: String) {
+        let cwd = ProcessInfo.processInfo.environment["NVTERM_NATIVE_CWD_EXPECTED"]
+            ?? "/tmp/neovide-tabs-terminal-nvim-cwd"
+        let cwdFile = ProcessInfo.processInfo.environment["NVTERM_NATIVE_CWD_ACTUAL"]
+            ?? "/tmp/neovide-tabs-terminal-nvim-cwd.actual"
+        try? FileManager.default.createDirectory(
+            atPath: cwd,
+            withIntermediateDirectories: true
+        )
+        try? FileManager.default.removeItem(atPath: cwdFile)
+
+        let cwdCommand = [
+            "cd \(shellQuote(cwd))",
+            "printf '\\u{1b}]7;file://localhost\(cwd)\\u{07}'",
+        ].joined(separator: "; ")
+        writeToActivePane(Data("\(cwdCommand)\r".utf8))
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.writeToActivePane(Data("nvim\r".utf8))
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+            self?.runNvimCommandOrWrite(
+                "call writefile([getcwd()], '\(vimSingleQuote(cwdFile))')",
+                fallback: Data()
+            )
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.writeTerminalNvimCwdSmokeResult(
+                resultPath,
+                expected: cwd,
+                actualFile: cwdFile,
+                retries: 16
+            )
+        }
+    }
+
     func applyTerminalNvimQuitSmokeScenario(resultPath: String) {
         writeToActivePane(Data("nvim\r".utf8))
 
@@ -3493,6 +3579,35 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             : "failed terminal-nvim-handoff mode=\(activePaneMode()) " +
                 "model-frames=\(modelFrames ? "yes" : "no") " +
                 "skia-frames=\(skiaFrames) text=\(textOk ? "yes" : "no")\n"
+        try? result.write(toFile: resultPath, atomically: true, encoding: .utf8)
+        NSApp.terminate(nil)
+    }
+
+    private func writeTerminalNvimCwdSmokeResult(
+        _ resultPath: String,
+        expected: String,
+        actualFile: String,
+        retries: Int
+    ) {
+        let actual = (try? String(contentsOfFile: actualFile, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let ok = activePaneMode() == .neovim && actual == expected
+        if !ok, retries > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.writeTerminalNvimCwdSmokeResult(
+                    resultPath,
+                    expected: expected,
+                    actualFile: actualFile,
+                    retries: retries - 1
+                )
+            }
+            return
+        }
+
+        let result = ok
+            ? "ok terminal-nvim-cwd cwd=\(expected)\n"
+            : "failed terminal-nvim-cwd expected=\(expected) actual=\(actual ?? "nil") " +
+                "mode=\(activePaneMode())\n"
         try? result.write(toFile: resultPath, atomically: true, encoding: .utf8)
         NSApp.terminate(nil)
     }
@@ -4235,7 +4350,8 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         paneId: Int,
         request: NeovimLaunchRequest
     ) -> Bool {
-        guard let pane = RustNeovimPane(grid: terminalTextView.terminalGridSize()) else {
+        let cwd = terminalPanes[paneId]?.currentWorkingDirectory()
+        guard let pane = RustNeovimPane(grid: terminalTextView.terminalGridSize(), cwd: cwd) else {
             return false
         }
         terminalPanes[paneId] = pane
@@ -4491,6 +4607,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "terminal-nvim-handoff":
             if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
                 controller.applyTerminalNvimHandoffSmokeScenario(resultPath: path)
+            }
+        case "terminal-nvim-cwd":
+            if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
+                controller.applyTerminalNvimCwdSmokeScenario(resultPath: path)
             }
         case "terminal-nvim-quit":
             if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {

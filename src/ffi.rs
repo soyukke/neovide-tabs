@@ -1,5 +1,5 @@
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::ptr;
+use std::{path::PathBuf, ptr};
 
 use serde::Serialize;
 
@@ -218,6 +218,17 @@ pub extern "C" fn nvterm_runtime_renderer_scroll_position(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_cwd(handle: *const NativeTerminalRuntime) -> *mut c_char {
+    let Some(runtime) = runtime_ref(handle) else {
+        return ptr::null_mut();
+    };
+    let Some(cwd) = runtime.current_working_directory() else {
+        return ptr::null_mut();
+    };
+    string_ptr(cwd.to_string_lossy().into_owned())
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn nvterm_nvim_create(
     rows: u16,
     cols: u16,
@@ -230,7 +241,28 @@ pub extern "C" fn nvterm_nvim_create(
         pixel_width,
         pixel_height,
     };
-    match NativeNeovimRuntime::spawn(size) {
+    create_nvim_runtime(size, None)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_nvim_create_in_cwd(
+    rows: u16,
+    cols: u16,
+    pixel_width: u16,
+    pixel_height: u16,
+    cwd: *const c_char,
+) -> *mut NativeNeovimRuntime {
+    let size = TerminalGridSize {
+        rows,
+        cols,
+        pixel_width,
+        pixel_height,
+    };
+    create_nvim_runtime(size, c_string(cwd).map(PathBuf::from))
+}
+
+fn create_nvim_runtime(size: TerminalGridSize, cwd: Option<PathBuf>) -> *mut NativeNeovimRuntime {
+    match NativeNeovimRuntime::spawn_in_directory(size, cwd) {
         Ok(runtime) => Box::into_raw(Box::new(runtime)),
         Err(_) => ptr::null_mut(),
     }
