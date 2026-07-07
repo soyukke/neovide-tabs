@@ -46,7 +46,7 @@ fi
 
 for _ in {1..100}; do
   if [[ -s "$result_file" ]] &&
-    /usr/sbin/screencapture -x -l "$window_id" "$shot" 2>"$capture_error" &&
+    ./scripts/native-window-capture "$window_id" "$shot" 2>"$capture_error" &&
     [[ -s "$shot" ]] &&
     ./scripts/native-smoke-verify "$shot" nvim-ui-surfaces "$result_file" 2>"$verify_error"; then
     cat "$result_file"

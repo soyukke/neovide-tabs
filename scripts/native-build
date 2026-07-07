@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+  exec nix develop --command just native-build
+fi
+
+build_dir="spikes/macos-shell/.build"
+output="$build_dir/NativeShellSpike"
+tmp_output="$build_dir/NativeShellSpike.$$"
+lock_dir="$build_dir/native-build.lock"
+
+mkdir -p "$build_dir"
+
+acquire_lock() {
+  local waits=0
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    local owner=""
+    if [[ -r "$lock_dir/pid" ]]; then
+      owner="$(cat "$lock_dir/pid" 2>/dev/null || true)"
+    fi
+    if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+      rm -f "$lock_dir/pid"
+      rmdir "$lock_dir" 2>/dev/null || true
+      continue
+    fi
+    if (( waits >= 600 )); then
+      echo "native build lock timed out: $lock_dir" >&2
+      exit 75
+    fi
+    waits=$((waits + 1))
+    sleep 0.1
+  done
+  echo "$$" >"$lock_dir/pid"
+}
+
+cleanup() {
+  rm -f "$tmp_output"
+  rm -rf "$lock_dir"
+}
+
+acquire_lock
+trap cleanup EXIT INT TERM
+
+cargo build --lib
+sdk="$(env -u SDKROOT -u DEVELOPER_DIR /usr/bin/xcrun --sdk macosx --show-sdk-path)"
+env -u SDKROOT -u DEVELOPER_DIR \
+  /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc \
+  -sdk "$sdk" \
+  spikes/macos-shell/NativeShellSpike.swift \
+  target/debug/libneovide_tabs.a \
+  -framework AppKit \
+  -framework MetalKit \
+  -framework Metal \
+  -framework QuartzCore \
+  -lc++ \
+  -o "$tmp_output"
+mv -f "$tmp_output" "$output"
