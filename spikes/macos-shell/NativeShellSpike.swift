@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import Foundation
 import MetalKit
 
@@ -205,7 +206,13 @@ private let maxScrollRegionDetectionRows = 80
 private let minFullFrameScrollMatchRows = 4
 private let minTerminalVimScrollSmokePosition = 3.0
 private let maxTerminalBottomInputSmokePosition = 0.1
+private let terminalNvimHandoffDrainInterval: TimeInterval = 0.05
+private let terminalNvimHandoffDrainAttempts = 6
+private let terminalNvimHandoffMinimumDrainAttempts = 2
+private let nvimStartupCommandDelay: TimeInterval = 0.4
 private let minJumpAnimationContentRows = 8
+private let nvimSmokeReadyMarker = "NVSMOKE_READY"
+private let nvimJumpBaselineDelay: TimeInterval = 0.5
 private let minScrollRegionContentRows = 2
 private let outputScrollAnimationFarLines = 1
 private let themeAccentColors: [String: NSColor] = [
@@ -3438,7 +3445,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     private func moveNvimSmokeToBottomThenJump(_ resultPath: String, attempts: Int) {
         clearSmokeScrollShift()
         metalView.resetSkiaFrameCount()
-        writeToActivePane(Data("\u{1b}G".utf8))
+        runNvimCommandOrWrite("normal! G", fallback: Data("\u{1b}G".utf8))
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.finishNvimSmokeBottomMove(resultPath, attempts: attempts)
@@ -3446,18 +3453,41 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     private func waitForNvimSmokeContentThenJump(_ resultPath: String, retries: Int) {
-        guard terminalTextView.rendererContentRowCount() >= minJumpAnimationContentRows else {
+        let contentRows = terminalTextView.rendererContentRowCount()
+        let hasReadyMarker = terminalTextView.rendererModelContainsTexts([nvimSmokeReadyMarker])
+        let contentReady = hasReadyMarker
+        guard contentReady else {
             if retries > 0 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                     self?.waitForNvimSmokeContentThenJump(resultPath, retries: retries - 1)
                 }
                 return
             }
-            writeNvimAnimationSmokeResult(resultPath, retries: 0)
+            writeNvimJumpContentNotReadyResult(
+                resultPath,
+                contentRows: contentRows,
+                hasReadyMarker: hasReadyMarker
+            )
             return
         }
 
-        moveNvimSmokeToBottomThenJump(resultPath, attempts: 4)
+        DispatchQueue.main.asyncAfter(deadline: .now() + nvimJumpBaselineDelay) { [weak self] in
+            self?.moveNvimSmokeToBottomThenJump(resultPath, attempts: 4)
+        }
+    }
+
+    private func writeNvimJumpContentNotReadyResult(
+        _ resultPath: String,
+        contentRows: Int,
+        hasReadyMarker: Bool
+    ) {
+        let rendererSummary = "model-frames=\(terminalTextView.hasRendererModelFrames() ? "yes" : "no") " +
+            "skia-frames=\(metalView.skiaFrames() > 0 ? "yes" : "no") count=\(metalView.skiaFrames())"
+        let markerSummary = hasReadyMarker ? "yes" : "no"
+        let result = "failed jump-content-not-ready rows=\(contentRows) " +
+            "marker=\(markerSummary) \(rendererSummary)\n"
+        try? result.write(toFile: resultPath, atomically: true, encoding: .utf8)
+        NSApp.terminate(nil)
     }
 
     private func finishNvimSmokeBottomMove(_ resultPath: String, attempts: Int) {
@@ -3470,7 +3500,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
         clearSmokeScrollShift()
         metalView.resetSkiaFrameCount()
-        writeToActivePane(Data("\u{1b}gg".utf8))
+        runNvimCommandOrWrite("normal! gg", fallback: Data("\u{1b}gg".utf8))
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.writeNvimAnimationSmokeResult(resultPath, retries: 8)
@@ -4088,8 +4118,9 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             ].joined(separator: "; ")
             writeToActivePane(Data("\(command)\r".utf8))
         case .neovim:
-            runNvimCommandOrWrite(
-                "edit \(path)",
+            scheduleNvimCommand(
+                neovimEditTopCommand(path),
+                paneId: activePaneId,
                 fallback: Data(":edit \(path)\r".utf8)
             )
         }
@@ -4105,15 +4136,17 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             ].joined(separator: "; ")
             writeToActivePane(Data("\(command)\r".utf8))
         case .neovim:
-            runNvimCommandOrWrite(
-                "edit \(path)",
+            scheduleNvimCommand(
+                neovimEditTopCommand(path),
+                paneId: activePaneId,
                 fallback: Data(":edit \(path)\r".utf8)
             )
         }
     }
 
     private func writeSmokeLines(path: String) {
-        let text = (1...300).map(String.init).joined(separator: "\n") + "\n"
+        let lines = [nvimSmokeReadyMarker] + (1...300).map(String.init)
+        let text = lines.joined(separator: "\n") + "\n"
         try? text.write(toFile: path, atomically: true, encoding: .utf8)
     }
 
@@ -4187,6 +4220,20 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         }
     }
 
+    private func scheduleNvimCommand(
+        _ command: String,
+        paneId: Int?,
+        fallback: Data? = nil,
+        delay: TimeInterval = nvimStartupCommandDelay
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, let targetPaneId = paneId ?? self.activePaneId else {
+                return
+            }
+            self.runNvimCommand(command, paneId: targetPaneId, fallback: fallback)
+        }
+    }
+
     @discardableResult
     private func runNvimCommand(_ command: String) -> Bool {
         guard let paneId = activePaneId,
@@ -4202,6 +4249,18 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             drainTerminalPanes()
         }
         return ok
+    }
+
+    private func runNvimCommand(_ command: String, paneId: Int, fallback: Data?) {
+        guard let pane = terminalPanes[paneId], pane.kind == .neovim else {
+            return
+        }
+        if pane.runCommand(command) {
+            drainTerminalPanes()
+        } else if let fallback {
+            pane.write(fallback)
+            drainTerminalPanes()
+        }
     }
 
     private func syncFromCore() {
@@ -4382,12 +4441,52 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
         pane.write(Data([0x15]))
         _ = pane.drain()
-        guard switchTerminalPaneToNeovim(paneId: paneId, request: request) else {
-            pane.write(data)
-            drainTerminalPanes()
-            return true
-        }
+        scheduleTerminalNeovimHandoff(paneId: paneId, request: request, fallback: data)
         return true
+    }
+
+    private func scheduleTerminalNeovimHandoff(
+        paneId: Int,
+        request: NeovimLaunchRequest,
+        fallback: Data,
+        attempts: Int = terminalNvimHandoffDrainAttempts
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + terminalNvimHandoffDrainInterval) { [weak self] in
+            self?.finishTerminalNeovimHandoff(
+                paneId: paneId,
+                request: request,
+                fallback: fallback,
+                attempts: attempts
+            )
+        }
+    }
+
+    private func finishTerminalNeovimHandoff(
+        paneId: Int,
+        request: NeovimLaunchRequest,
+        fallback: Data,
+        attempts: Int
+    ) {
+        guard let pane = terminalPanes[paneId], pane.kind == .terminal else {
+            return
+        }
+        let changed = pane.drain()
+        let minimumDrainRemaining = attempts >
+            terminalNvimHandoffDrainAttempts - terminalNvimHandoffMinimumDrainAttempts
+        if attempts > 0 && (minimumDrainRemaining || changed) {
+            scheduleTerminalNeovimHandoff(
+                paneId: paneId,
+                request: request,
+                fallback: fallback,
+                attempts: attempts - 1
+            )
+            return
+        }
+        guard switchTerminalPaneToNeovim(paneId: paneId, request: request) else {
+            pane.write(fallback)
+            drainTerminalPanes()
+            return
+        }
     }
 
     private func switchTerminalPaneToNeovim(
@@ -4404,7 +4503,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         terminalTextView.resetScrollAnimation()
         lastNvimModelScrollShift = nil
         if let file = request.file {
-            _ = pane.runCommand(neovimEditCommand(file))
+            scheduleNvimCommand(neovimEditCommand(file), paneId: paneId)
         }
         drainTerminalPanes()
         updateActiveFrame()
@@ -4449,7 +4548,11 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     private func neovimEditCommand(_ file: String) -> String {
-        "execute 'edit' fnameescape('\(vimSingleQuoted(file))')"
+        "execute 'edit!' fnameescape('\(vimSingleQuoted(file))')"
+    }
+
+    private func neovimEditTopCommand(_ file: String) -> String {
+        "\(neovimEditCommand(file)) | normal! gg"
     }
 
     private func vimSingleQuoted(_ value: String) -> String {
@@ -4765,11 +4868,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let path = environment["NVTERM_NATIVE_SMOKE_WINDOW_ID"], !path.isEmpty else {
             return
         }
-        try? "\(window.windowNumber)\n".write(
-            toFile: path,
-            atomically: true,
-            encoding: .utf8
-        )
+        writeSmokeWindowId(path: path, window: window, attempts: 20)
+    }
+
+    private func writeSmokeWindowId(path: String, window: NSWindow, attempts: Int) {
+        if let windowId = cgWindowNumberForCurrentProcess() {
+            try? "\(windowId)\n".write(
+                toFile: path,
+                atomically: true,
+                encoding: .utf8
+            )
+            return
+        }
+        guard attempts > 0 else {
+            try? "\(window.windowNumber)\n".write(
+                toFile: path,
+                atomically: true,
+                encoding: .utf8
+            )
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak window] in
+            guard let window else {
+                return
+            }
+            self?.writeSmokeWindowId(path: path, window: window, attempts: attempts - 1)
+        }
+    }
+
+    private func cgWindowNumberForCurrentProcess() -> Int? {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+        let pid = Int(ProcessInfo.processInfo.processIdentifier)
+        return windows
+            .filter { info in
+                cgWindowInt(info[kCGWindowOwnerPID as String]) == pid &&
+                    cgWindowInt(info[kCGWindowLayer as String]) == 0
+            }
+            .max { lhs, rhs in
+                cgWindowArea(lhs) < cgWindowArea(rhs)
+            }
+            .flatMap { cgWindowInt($0[kCGWindowNumber as String]) }
+    }
+
+    private func cgWindowArea(_ info: [String: Any]) -> Double {
+        guard let bounds = info[kCGWindowBounds as String] as? [String: Any] else {
+            return 0
+        }
+        let width = cgWindowBoundValue(bounds["Width"])
+        let height = cgWindowBoundValue(bounds["Height"])
+        return width * height
+    }
+
+    private func cgWindowInt(_ value: Any?) -> Int? {
+        switch value {
+        case let value as Int:
+            return value
+        case let value as Int32:
+            return Int(value)
+        case let value as Int64:
+            return Int(value)
+        case let value as NSNumber:
+            return value.intValue
+        default:
+            return nil
+        }
+    }
+
+    private func cgWindowBoundValue(_ value: Any?) -> Double {
+        switch value {
+        case let value as Double:
+            return value
+        case let value as CGFloat:
+            return Double(value)
+        case let value as NSNumber:
+            return value.doubleValue
+        default:
+            return 0
+        }
     }
 
     private func writeSmokeShot(path: String, window: NSWindow) {

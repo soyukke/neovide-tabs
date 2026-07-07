@@ -39,7 +39,7 @@ alias launch := terminal
 
 # Build the native macOS terminal host.
 native-build:
-    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-build; else cargo build --lib && mkdir -p spikes/macos-shell/.build && sdk=$(env -u SDKROOT -u DEVELOPER_DIR /usr/bin/xcrun --sdk macosx --show-sdk-path) && env -u SDKROOT -u DEVELOPER_DIR /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -sdk "$sdk" spikes/macos-shell/NativeShellSpike.swift target/debug/libneovide_tabs.a -framework AppKit -framework MetalKit -framework Metal -framework QuartzCore -lc++ -o spikes/macos-shell/.build/NativeShellSpike; fi
+    @./scripts/native-build
 
 # Build and run the native macOS terminal host.
 native-spike:

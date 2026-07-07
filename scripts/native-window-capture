@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+  echo "usage: native-window-capture WINDOW_ID OUTPUT_PNG" >&2
+  exit 64
+fi
+
+window_id="$1"
+output="$2"
+full_capture="${output}.full.png"
+bounds_file="${output}.bounds"
+
+rm -f "$output" "$full_capture" "$bounds_file"
+cleanup_auxiliary_files() {
+  rm -f "$full_capture" "$bounds_file"
+}
+trap cleanup_auxiliary_files EXIT
+
+if /usr/sbin/screencapture -x -l "$window_id" "$output" 2>/dev/null && [[ -s "$output" ]]; then
+  exit 0
+fi
+
+swift_bin="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift"
+env -u SDKROOT -u DEVELOPER_DIR "$swift_bin" -e '
+import CoreGraphics
+import Foundation
+
+let windowID = CGWindowID(Int(CommandLine.arguments[1]) ?? 0)
+let info = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]]
+guard
+    let bounds = info?.first?[kCGWindowBounds as String] as? [String: Any],
+    let x = bounds["X"] as? NSNumber,
+    let y = bounds["Y"] as? NSNumber,
+    let width = bounds["Width"] as? NSNumber,
+    let height = bounds["Height"] as? NSNumber
+else {
+    exit(65)
+}
+print("\(x.intValue) \(y.intValue) \(width.intValue) \(height.intValue)")
+' "$window_id" >"$bounds_file"
+
+read -r x y width height <"$bounds_file"
+if [[ -z "${x:-}" || -z "${y:-}" || -z "${width:-}" || -z "${height:-}" ]]; then
+  echo "native window capture failed: missing bounds for window $window_id" >&2
+  exit 65
+fi
+
+/usr/sbin/screencapture -x "$full_capture"
+/usr/bin/sips \
+  -c "$height" "$width" \
+  --cropOffset "$y" "$x" \
+  "$full_capture" \
+  --out "$output" >/dev/null
+
+[[ -s "$output" ]]
