@@ -297,9 +297,9 @@ native smoke gate.
 
 - Add a proper key encoder from `libghostty-vt::key` instead of manual escape
   strings.
-- Add mouse reporting for alternate-screen apps.
+- Add mouse reporting for terminal-pane alternate-screen apps.
 - Expand the native Neovim pane compositor to cover more Neovide behavior:
-  externalized windows and mouse input.
+  externalized windows and richer mouse input such as drag selection.
 - Expand deterministic visual coverage for shaped Japanese text, Nerd Font
   symbols, combining marks, ambiguous-width characters, and more Neovim UI
   surface combinations in the Skia/Metal path.

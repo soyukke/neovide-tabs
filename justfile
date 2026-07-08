@@ -171,6 +171,14 @@ nvim-smoke-popupmenu:
 _nvim-smoke-popupmenu:
     @./scripts/native-nvim-popupmenu-smoke
 
+# Verify file-tree plugin panes render and mouse selection can open a file.
+nvim-smoke-file-tree:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
+        exec nix develop --command just nvim-smoke-file-tree; \
+    else \
+        just native-build && just _nvim-smoke nvim-file-tree; \
+    fi
+
 # Verify Neovim mode cursor shape reaches the Skia/Metal cursor body.
 nvim-smoke-cursor-shape:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then \
