@@ -339,6 +339,33 @@ pub unsafe extern "C" fn nvterm_nvim_input(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn nvterm_nvim_mouse(
+    handle: *mut NativeNeovimRuntime,
+    button: *const c_char,
+    action: *const c_char,
+    modifier: *const c_char,
+    grid: i64,
+    row: i64,
+    col: i64,
+) -> u8 {
+    let Some(runtime) = nvim_mut(handle) else {
+        return 0;
+    };
+    let Some(button) = c_string(button) else {
+        return 0;
+    };
+    let Some(action) = c_string(action) else {
+        return 0;
+    };
+    let Some(modifier) = c_string(modifier) else {
+        return 0;
+    };
+    runtime
+        .mouse_input(&button, &action, &modifier, grid, row, col)
+        .is_ok() as u8
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn nvterm_nvim_command(
     handle: *mut NativeNeovimRuntime,
     command: *const c_char,

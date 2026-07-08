@@ -39,7 +39,8 @@ impl NativeNeovimRuntime {
     }
 
     pub fn spawn_in_directory(size: TerminalGridSize, cwd: Option<PathBuf>) -> Result<Self> {
-        let (process, rx) = NeovimProcess::spawn(cwd.as_deref())?;
+        let initial_cwd = cwd.or_else(|| env::current_dir().ok());
+        let (process, rx) = NeovimProcess::spawn(initial_cwd.as_deref())?;
         let mut runtime = Self {
             process,
             rx,
@@ -48,6 +49,9 @@ impl NativeNeovimRuntime {
             exited: false,
         };
         runtime.attach(size)?;
+        if let Some(cwd) = initial_cwd {
+            runtime.set_current_directory(&cwd)?;
+        }
         Ok(runtime)
     }
 
@@ -67,8 +71,37 @@ impl NativeNeovimRuntime {
         self.request("nvim_input", vec![input.into()])
     }
 
+    pub fn mouse_input(
+        &mut self,
+        button: &str,
+        action: &str,
+        modifier: &str,
+        grid: i64,
+        row: i64,
+        col: i64,
+    ) -> Result<()> {
+        self.request(
+            "nvim_input_mouse",
+            vec![
+                button.into(),
+                action.into(),
+                modifier.into(),
+                grid.into(),
+                row.into(),
+                col.into(),
+            ],
+        )
+    }
+
     pub fn command(&mut self, command: &str) -> Result<()> {
         self.request("nvim_command", vec![command.into()])
+    }
+
+    fn set_current_directory(&mut self, cwd: &Path) -> Result<()> {
+        self.request(
+            "nvim_set_current_dir",
+            vec![cwd.to_string_lossy().into_owned().into()],
+        )
     }
 
     pub fn drain(&mut self) -> Result<bool> {
@@ -206,6 +239,8 @@ impl NeovimProcess {
             .arg("let g:neovide = v:true")
             .arg("--cmd")
             .arg("let g:neovide_tabs = v:true")
+            .arg("--cmd")
+            .arg("let g:auto_session_enabled = v:false")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

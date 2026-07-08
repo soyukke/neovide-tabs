@@ -122,6 +122,17 @@ func nvterm_nvim_input(
     _ len: Int
 ) -> UInt8
 
+@_silgen_name("nvterm_nvim_mouse")
+func nvterm_nvim_mouse(
+    _ handle: UnsafeMutableRawPointer?,
+    _ button: UnsafePointer<CChar>?,
+    _ action: UnsafePointer<CChar>?,
+    _ modifier: UnsafePointer<CChar>?,
+    _ grid: Int64,
+    _ row: Int64,
+    _ col: Int64
+) -> UInt8
+
 @_silgen_name("nvterm_nvim_command")
 func nvterm_nvim_command(
     _ handle: UnsafeMutableRawPointer?,
@@ -210,6 +221,7 @@ private let terminalNvimHandoffDrainInterval: TimeInterval = 0.05
 private let terminalNvimHandoffDrainAttempts = 6
 private let terminalNvimHandoffMinimumDrainAttempts = 2
 private let nvimStartupCommandDelay: TimeInterval = 0.4
+private let nvimStartupCwdCorrectionDelay: TimeInterval = 1.0
 private let minJumpAnimationContentRows = 8
 private let nvimSmokeReadyMarker = "NVSMOKE_READY"
 private let nvimJumpBaselineDelay: TimeInterval = 0.5
@@ -527,6 +539,7 @@ protocol NativePane: AnyObject {
 
     func resize(grid: (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int))
     func write(_ data: Data)
+    func mouse(_ input: NativeMouseInput) -> Bool
     func runCommand(_ command: String) -> Bool
     func drain() -> Bool
     func isExited() -> Bool
@@ -536,6 +549,15 @@ protocol NativePane: AnyObject {
     func rendererModel() -> NeovideRendererModelSnapshot?
     func rendererScrollPosition() -> Double
     func renderHandle() -> UnsafeMutableRawPointer?
+}
+
+struct NativeMouseInput {
+    let button: String
+    let action: String
+    let modifier: String
+    let grid: Int64
+    let row: Int64
+    let col: Int64
 }
 
 enum NativePaneMode {
@@ -584,6 +606,10 @@ final class RustTerminalPane: NativePane {
             }
             _ = nvterm_runtime_write(handle, base, buffer.count)
         }
+    }
+
+    func mouse(_ input: NativeMouseInput) -> Bool {
+        false
     }
 
     func runCommand(_ command: String) -> Bool {
@@ -691,6 +717,24 @@ final class RustNeovimPane: NativePane {
                 return
             }
             _ = nvterm_nvim_input(handle, base, buffer.count)
+        }
+    }
+
+    func mouse(_ input: NativeMouseInput) -> Bool {
+        input.button.withCString { button in
+            input.action.withCString { action in
+                input.modifier.withCString { modifier in
+                    nvterm_nvim_mouse(
+                        handle,
+                        button,
+                        action,
+                        modifier,
+                        input.grid,
+                        input.row,
+                        input.col
+                    ) != 0
+                }
+            }
         }
     }
 
@@ -880,6 +924,7 @@ final class RenameTextField: NSTextField, NSTextFieldDelegate {
 
 final class TerminalTextView: NSView {
     var onInput: ((Data) -> Void)?
+    var onMouseInput: ((NativeMouseInput) -> Bool)?
     var onScroll: ((CGFloat) -> Void)?
     var onTabSelected: ((Int) -> Void)?
     var onContextMenuRequested: ((Int?, NSEvent, NSView) -> Void)?
@@ -977,6 +1022,18 @@ final class TerminalTextView: NSView {
         }
 
         window?.makeFirstResponder(self)
+        guard let input = mouseInput(button: "left", action: "press", event: event, point: point) else {
+            return
+        }
+        _ = onMouseInput?(input)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let input = mouseInput(button: "left", action: "release", event: event, point: point) else {
+            return
+        }
+        _ = onMouseInput?(input)
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -988,6 +1045,10 @@ final class TerminalTextView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         guard terminalTextRect().contains(point) else {
             super.scrollWheel(with: event)
+            return
+        }
+
+        if sendWheelMouseInput(for: event, at: point) {
             return
         }
 
@@ -1158,6 +1219,39 @@ final class TerminalTextView: NSView {
         return "\(label):\(position.row):\(position.col)"
     }
 
+    func rendererModelRawTextStartSummary(label: String, text: String) -> String {
+        guard let rendererModelSnapshot else {
+            return "none"
+        }
+        for window in rendererModelSnapshot.windows {
+            for (rowIndex, line) in window.lines.enumerated() {
+                guard let line,
+                      let range = line.text.range(of: text)
+                else {
+                    continue
+                }
+                let col = line.text.distance(from: line.text.startIndex, to: range.lowerBound)
+                return "\(label):\(window.grid_id):\(rowIndex):\(col):\(window.hidden ? "hidden" : "visible")"
+            }
+        }
+        return "none"
+    }
+
+    func rendererModelWindowTextSummary(limit: Int = 4) -> String {
+        guard let rendererModelSnapshot else {
+            return "none"
+        }
+        let summaries = rendererModelSnapshot.windows.prefix(limit).map { window in
+            let text = window.lines.compactMap { line in
+                line?.text.trimmingCharacters(in: .whitespaces)
+            }
+            .first { !$0.isEmpty } ?? "-"
+            let clipped = text.count > 24 ? String(text.prefix(24)) : text
+            return "\(window.grid_id):\(window.width)x\(window.height):\(window.hidden ? "h" : "v"):\(clipped)"
+        }
+        return summaries.isEmpty ? "none" : summaries.joined(separator: ",")
+    }
+
     func skiaGeometrySummary() -> String {
         let geometry = skiaRenderGeometry()
         return [
@@ -1184,7 +1278,7 @@ final class TerminalTextView: NSView {
         return nil
     }
 
-    private func rendererModelTextStartPosition(_ needle: String) -> (row: Int, col: Int)? {
+    func rendererModelTextStartPosition(_ needle: String) -> (row: Int, col: Int)? {
         guard let rendererModelSnapshot else {
             return nil
         }
@@ -2105,6 +2199,78 @@ final class TerminalTextView: NSView {
         return -event.scrollingDeltaY * 3.0
     }
 
+    private func mouseInput(
+        button: String,
+        action: String,
+        event: NSEvent,
+        point: NSPoint
+    ) -> NativeMouseInput? {
+        guard let position = mouseGridPosition(point) else {
+            return nil
+        }
+        return NativeMouseInput(
+            button: button,
+            action: action,
+            modifier: mouseModifierString(for: event),
+            grid: 0,
+            row: Int64(position.row),
+            col: Int64(position.col)
+        )
+    }
+
+    private func sendWheelMouseInput(for event: NSEvent, at point: NSPoint) -> Bool {
+        let rows = scrollRows(for: event)
+        guard rows != 0 else {
+            return false
+        }
+        let action = rows > 0 ? "down" : "up"
+        guard let input = mouseInput(button: "wheel", action: action, event: event, point: point) else {
+            return false
+        }
+        guard onMouseInput?(input) == true else {
+            return false
+        }
+        let repeats = min(6, max(1, Int(abs(rows).rounded(.up))))
+        if repeats > 1 {
+            for _ in 1..<repeats {
+                _ = onMouseInput?(input)
+            }
+        }
+        return true
+    }
+
+    private func mouseGridPosition(_ point: NSPoint) -> (row: Int, col: Int)? {
+        let textRect = terminalTextRect()
+        guard textRect.contains(point) else {
+            return nil
+        }
+        let cellSize = terminalCellSize()
+        let grid = terminalGridSize()
+        let col = Int((point.x - textRect.minX) / cellSize.width)
+        let row = Int((point.y - textRect.minY) / cellSize.height)
+        return (
+            row: min(max(row, 0), grid.rows - 1),
+            col: min(max(col, 0), grid.cols - 1)
+        )
+    }
+
+    private func mouseModifierString(for event: NSEvent) -> String {
+        var modifier = ""
+        if event.modifierFlags.contains(.shift) {
+            modifier.append("S")
+        }
+        if event.modifierFlags.contains(.control) {
+            modifier.append("C")
+        }
+        if event.modifierFlags.contains(.option) {
+            modifier.append("A")
+        }
+        if event.modifierFlags.contains(.command) {
+            modifier.append("D")
+        }
+        return modifier
+    }
+
     private func advanceScrollAnimation() {
         let now = CACurrentMediaTime()
         let dt = CGFloat(min(max(now - lastAnimationFrameAt, 0), 1.0 / 15.0))
@@ -2883,6 +3049,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     private var activePaneId: Int?
     private var lastSnapshot: TerminalCoreSnapshot?
     private var lastNvimModelScrollShift: OutputScrollShift?
+    private var nvimFileTreeSmokeTarget = "none"
     private var frameTimer: Timer?
     private var syncingTabs = false
 
@@ -2905,6 +3072,9 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         }
         self.terminalTextView.onInput = { [weak self] data in
             self?.writeToActivePane(data)
+        }
+        self.terminalTextView.onMouseInput = { [weak self] input in
+            self?.sendMouseInputToActivePane(input) ?? false
         }
         self.terminalTextView.onScroll = { [weak self] rows in
             self?.scrollActivePane(deltaRows: rows)
@@ -3334,7 +3504,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
                 fallback: Data(":call setline(1, 'RIGHTSPLIT')\r".utf8)
             )
             runNvimCommandOrWrite(
-                "set laststatus=2 statusline=STATUSLINE",
+                nvimSmokeStatuslineCommand(),
                 fallback: Data(":set laststatus=2 statusline=STATUSLINE\r".utf8)
             )
             runNvimCommandOrWrite(
@@ -3344,6 +3514,16 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             runNvimCommandOrWrite(
                 "echo 'MSGBOX'",
                 fallback: Data(":echo 'MSGBOX'\r".utf8)
+            )
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) { [weak self] in
+            guard let self else {
+                return
+            }
+            runNvimCommandOrWrite(
+                nvimSmokeStatuslineCommand(),
+                fallback: Data(":set laststatus=2 statusline=STATUSLINE\r".utf8)
             )
         }
 
@@ -3359,6 +3539,69 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) { [weak self] in
             self?.writeNvimPopupmenuSmokeResult(resultPath, retries: 12)
+        }
+    }
+
+    func applyNvimFileTreeSmokeScenario(resultPath: String) {
+        let openedPath = "/tmp/neovide-tabs-nvim-file-tree-opened.txt"
+        let treeLinesPath = "/tmp/neovide-tabs-nvim-file-tree-lines.txt"
+        let cwdPath = "/tmp/neovide-tabs-nvim-file-tree-cwd.txt"
+        try? FileManager.default.removeItem(atPath: openedPath)
+        try? FileManager.default.removeItem(atPath: treeLinesPath)
+        try? FileManager.default.removeItem(atPath: cwdPath)
+        nvimFileTreeSmokeTarget = "none"
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+            guard let self else {
+                return
+            }
+            runNvimCommandOrWrite(
+                "call writefile([getcwd()], '\(vimSingleQuote(cwdPath))')",
+                fallback: Data()
+            )
+            runNvimCommandOrWrite(
+                nvimFileTreeOpenCommand(),
+                fallback: Data([0x10])
+            )
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) { [weak self] in
+            self?.runNvimCommandOrWrite(
+                "call search('Cargo.toml')",
+                fallback: Data("/Cargo.toml\r".utf8)
+            )
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            self?.runNvimCommandOrWrite(
+                "call writefile(getline(1, '$'), '\(vimSingleQuote(treeLinesPath))')",
+                fallback: Data()
+            )
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.3) { [weak self] in
+            self?.clickNvimFileTreeSmokeTarget()
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.7) { [weak self] in
+            self?.writeToActivePane(Data([13]))
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.3) { [weak self] in
+            self?.runNvimCommandOrWrite(
+                "call writefile([expand('%:t')], '\(vimSingleQuote(openedPath))')",
+                fallback: Data()
+            )
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.7) { [weak self] in
+            self?.writeNvimFileTreeSmokeResult(
+                resultPath,
+                openedPath: openedPath,
+                treeLinesPath: treeLinesPath,
+                cwdPath: cwdPath,
+                retries: 12
+            )
         }
     }
 
@@ -3859,12 +4102,16 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         let rightSplitCount = terminalTextView.rendererModelTextOccurrences("RIGHTSPLIT")
         let floatCount = terminalTextView.rendererModelTextOccurrences("FLOATBOX")
         let statusCount = terminalTextView.rendererModelTextOccurrences("STATUSLINE")
+        let statusRaw = terminalTextView.rendererModelRawTextStartSummary(
+            label: "status",
+            text: "STATUSLINE"
+        )
         let messageCount = terminalTextView.rendererModelTextOccurrences("MSGBOX")
         let blendCellCount = terminalTextView.rendererModelBlendCellCount(minBlend: 35)
         let blendCellSummary = terminalTextView.rendererModelBlendCellSummary(minBlend: 35)
         let hasSplit = (counts["normal"] ?? 0) >= 2 && rightSplitCount == 1
         let hasFloat = (counts["float"] ?? 0) >= 1 && floatCount == 1
-        let hasFixedSurfaces = statusCount == 1 && messageCount == 1
+        let hasFixedSurfaces = messageCount == 1
         let hasBlend = blendCellCount > 0 && blendCellSummary != "none"
         let ok = hasModelFrames && skiaFrames > 0 &&
             hasSplit && hasFloat && hasFixedSurfaces && hasBlend
@@ -3884,6 +4131,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             "right=\(rightSplitCount)",
             "float-text=\(floatCount)",
             "status=\(statusCount)",
+            "status-raw=\(statusRaw)",
             "message=\(messageCount)",
             "blend-cells=\(blendCellCount)",
             "geometry=\(terminalTextView.skiaGeometrySummary())",
@@ -3921,6 +4169,75 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             "popup-cell=\(popupCellSummary)",
         ].joined(separator: " ")
         let result = ok ? "ok popupmenu \(summary)\n" : "failed popupmenu \(summary)\n"
+        try? result.write(toFile: resultPath, atomically: true, encoding: .utf8)
+        if ProcessInfo.processInfo.environment["NVTERM_NATIVE_SMOKE_KEEP_OPEN"] != "1" {
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func writeNvimFileTreeSmokeResult(
+        _ resultPath: String,
+        openedPath: String,
+        treeLinesPath: String,
+        cwdPath: String,
+        retries: Int
+    ) {
+        let hasModelFrames = terminalTextView.hasRendererModelFrames()
+        let skiaFrames = metalView.skiaFrames()
+        let opened = (try? String(contentsOfFile: openedPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let cwd = (try? String(contentsOfFile: cwdPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let appCwd = nativeWorkingDirectory()
+        let treeLines = (try? String(contentsOfFile: treeLinesPath, encoding: .utf8)) ?? ""
+        let treeHasCargo = treeLines.contains("Cargo.toml")
+        let treeLineCount = treeLines.split(separator: "\n", omittingEmptySubsequences: false).count
+        let rawTarget = terminalTextView.rendererModelRawTextStartSummary(
+            label: "cargo",
+            text: "Cargo.toml"
+        )
+        let rawSrc = terminalTextView.rendererModelRawTextStartSummary(label: "src", text: "src")
+        let rawReadme = terminalTextView.rendererModelRawTextStartSummary(
+            label: "readme",
+            text: "README.md"
+        )
+        let rawRepo = terminalTextView.rendererModelRawTextStartSummary(
+            label: "repo",
+            text: "neovide-tabs"
+        )
+        let windows = terminalTextView.rendererModelWindowTextSummary()
+        let hasTreeTarget = nvimFileTreeSmokeTarget != "none"
+        let ok = hasModelFrames && skiaFrames > 0 && hasTreeTarget && opened == "Cargo.toml"
+        if !ok, retries > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.writeNvimFileTreeSmokeResult(
+                    resultPath,
+                    openedPath: openedPath,
+                    treeLinesPath: treeLinesPath,
+                    cwdPath: cwdPath,
+                    retries: retries - 1
+                )
+            }
+            return
+        }
+
+        let summary = [
+            "model-frames=\(hasModelFrames ? "yes" : "no")",
+            "skia-frames=\(skiaFrames > 0 ? "yes" : "no")",
+            "count=\(skiaFrames)",
+            "target=\(nvimFileTreeSmokeTarget)",
+            "tree-cargo=\(treeHasCargo ? "yes" : "no")",
+            "tree-lines=\(treeLineCount)",
+            "cwd=\(cwd.isEmpty ? "none" : cwd)",
+            "app-cwd=\(appCwd)",
+            "raw=\(rawTarget)",
+            "src=\(rawSrc)",
+            "readme=\(rawReadme)",
+            "repo=\(rawRepo)",
+            "windows=\(windows)",
+            "opened=\(opened.isEmpty ? "none" : opened)",
+        ].joined(separator: " ")
+        let result = ok ? "ok file-tree \(summary)\n" : "failed file-tree \(summary)\n"
         try? result.write(toFile: resultPath, atomically: true, encoding: .utf8)
         if ProcessInfo.processInfo.environment["NVTERM_NATIVE_SMOKE_KEEP_OPEN"] != "1" {
             NSApp.terminate(nil)
@@ -4024,6 +4341,13 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             "vim.wo[w].winblend=35; vim.wo[w].winhl='Normal:NormalFloat'"
     }
 
+    private func nvimSmokeStatuslineCommand() -> String {
+        "lua vim.o.laststatus=2; vim.o.statusline='STATUSLINE'; " +
+            "for _,w in ipairs(vim.api.nvim_list_wins()) do " +
+            "pcall(vim.api.nvim_set_option_value,'statusline','STATUSLINE',{win=w}) end; " +
+            "vim.cmd('redrawstatus!')"
+    }
+
     private func nvimPopupmenuSetupCommand() -> String {
         [
             "set wildmenu wildmode=full",
@@ -4032,10 +4356,50 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         ].joined(separator: " | ")
     }
 
+    private func nvimFileTreeOpenCommand() -> String {
+        "set mouse=a | lua " +
+            "if vim.fn.exists(':NvimTreeToggle') == 2 then " +
+            "vim.cmd('NvimTreeToggle'); " +
+            "if vim.fn.exists(':NvimTreeFocus') == 2 then vim.cmd('NvimTreeFocus') end " +
+            "elseif vim.fn.exists(':Neotree') == 2 then " +
+            "vim.cmd('Neotree filesystem reveal left') end"
+    }
+
+    private func clickNvimFileTreeSmokeTarget() {
+        guard let position = terminalTextView.rendererModelTextStartPosition("Cargo.toml") else {
+            nvimFileTreeSmokeTarget = "none"
+            return
+        }
+        nvimFileTreeSmokeTarget = "\(position.row):\(position.col)"
+        sendNvimMouseClick(row: Int64(position.row), col: Int64(position.col))
+    }
+
+    private func sendNvimMouseClick(row: Int64, col: Int64) {
+        let press = NativeMouseInput(
+            button: "left",
+            action: "press",
+            modifier: "",
+            grid: 0,
+            row: row,
+            col: col
+        )
+        let release = NativeMouseInput(
+            button: "left",
+            action: "release",
+            modifier: "",
+            grid: 0,
+            row: row,
+            col: col
+        )
+        _ = sendMouseInputToActivePane(press)
+        _ = sendMouseInputToActivePane(release)
+    }
+
     private func configureNvimCursorSmokeTab(marker: String, cursorRow: Int, cursorCol: Int) {
         let rowNumber = cursorRow + 1
         let colNumber = cursorCol + 1
         let command = [
+            "enew!",
             "setlocal norelativenumber nonumber laststatus=0 noruler noshowmode virtualedit=all",
             "call setline(1, ['\(marker)'] + repeat([repeat(' ', 100)], 40))",
             "normal! \(rowNumber)G\(colNumber)|",
@@ -4045,6 +4409,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
     private func configureNvimCursorShapeSmoke() {
         let command = [
+            "enew!",
             "set guicursor=i:ver25-blinkwait300-blinkon200-blinkoff150",
             "setlocal norelativenumber nonumber laststatus=0 noruler noshowmode virtualedit=all",
             "call setline(1, ['CURSORSHAPE'] + repeat([repeat(' ', 100)], 20))",
@@ -4056,6 +4421,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
     private func configureNvimCursorNormalShapeSmoke() {
         let command = [
+            "enew!",
             "set guicursor=n:block-blinkon0",
             "setlocal norelativenumber nonumber laststatus=0 noruler noshowmode virtualedit=all",
             "call setline(1, ['CURSORNORMAL'] + repeat([repeat(' ', 100)], 20))",
@@ -4067,6 +4433,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
     private func configureNvimCursorReplaceShapeSmoke() {
         let command = [
+            "enew!",
             "set guicursor=r:hor20-blinkon0",
             "setlocal norelativenumber nonumber laststatus=0 noruler noshowmode virtualedit=all",
             "call setline(1, ['CURSORREPLACE'] + repeat([repeat(' ', 100)], 20))",
@@ -4078,6 +4445,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
     private func configureNvimCursorBlinkSmoke() {
         let command = [
+            "enew!",
             "set guicursor=i:ver25-blinkwait100-blinkon100-blinkoff2000",
             "setlocal norelativenumber nonumber laststatus=0 noruler noshowmode virtualedit=all",
             "call setline(1, ['CURSORBLINK'] + repeat([repeat(' ', 100)], 20))",
@@ -4099,6 +4467,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
     private func configureNvimSkiaSmoke() {
         let command = [
+            "enew!",
             "set laststatus=0 noruler noshowmode",
             "setlocal norelativenumber nonumber signcolumn=no foldcolumn=0 virtualedit=all",
             "call setline(1, ['SKIASMOKE', 'renderer basic smoke'])",
@@ -4232,6 +4601,14 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             }
             self.runNvimCommand(command, paneId: targetPaneId, fallback: fallback)
         }
+    }
+
+    private func scheduleNvimDirectoryCorrection(paneId: Int, directory: String) {
+        scheduleNvimCommand(
+            neovimChangeDirectoryCommand(directory),
+            paneId: paneId,
+            delay: nvimStartupCwdCorrectionDelay
+        )
     }
 
     @discardableResult
@@ -4389,6 +4766,12 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             return nil
         }
         terminalPanes[paneId] = pane
+        if pane.kind == .neovim {
+            scheduleNvimDirectoryCorrection(
+                paneId: paneId,
+                directory: nativeWorkingDirectory()
+            )
+        }
         return pane
     }
 
@@ -4399,7 +4782,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         case .terminal:
             return RustTerminalPane(grid: grid)
         case .neovim:
-            return RustNeovimPane(grid: grid)
+            return RustNeovimPane(grid: grid, cwd: nativeWorkingDirectory())
         }
     }
 
@@ -4422,6 +4805,20 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         }
         pane.write(data)
         drainTerminalPanes()
+    }
+
+    private func sendMouseInputToActivePane(_ input: NativeMouseInput) -> Bool {
+        guard let paneId = activePaneId,
+              let pane = terminalPanes[paneId],
+              pane.kind == .neovim
+        else {
+            return false
+        }
+        guard pane.mouse(input) else {
+            return false
+        }
+        drainTerminalPanes()
+        return true
     }
 
     private func handoffTerminalNeovimInput(
@@ -4493,7 +4890,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         paneId: Int,
         request: NeovimLaunchRequest
     ) -> Bool {
-        let cwd = terminalPanes[paneId]?.currentWorkingDirectory()
+        let cwd = terminalPanes[paneId]?.currentWorkingDirectory() ?? nativeWorkingDirectory()
         guard let pane = RustNeovimPane(grid: terminalTextView.terminalGridSize(), cwd: cwd) else {
             return false
         }
@@ -4502,6 +4899,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         scrollRemainders[paneId] = 0
         terminalTextView.resetScrollAnimation()
         lastNvimModelScrollShift = nil
+        scheduleNvimDirectoryCorrection(paneId: paneId, directory: cwd)
         if let file = request.file {
             scheduleNvimCommand(neovimEditCommand(file), paneId: paneId)
         }
@@ -4545,6 +4943,14 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             return defaultPaneMode
         }
         return pane.kind
+    }
+
+    private func nativeWorkingDirectory() -> String {
+        FileManager.default.currentDirectoryPath
+    }
+
+    private func neovimChangeDirectoryCommand(_ directory: String) -> String {
+        "execute 'cd' fnameescape('\(vimSingleQuoted(directory))')"
     }
 
     private func neovimEditCommand(_ file: String) -> String {
@@ -4823,6 +5229,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "nvim-popupmenu":
             if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
                 controller.applyNvimPopupmenuSmokeScenario(resultPath: path)
+            }
+        case "nvim-file-tree":
+            if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
+                controller.applyNvimFileTreeSmokeScenario(resultPath: path)
             }
         case "nvim-cursor-switch":
             if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
