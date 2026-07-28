@@ -242,3 +242,10 @@ The native Neovim compositor can continue toward deeper Neovide parity,
 including externalized windows and richer editor-side drag selection. Those
 renderer extensions remain event-driven; terminal behavior stays owned by
 `libghostty-vt`.
+
+## License
+
+The neovide-tabs source is available under the [MIT License](LICENSE),
+copyright © 2026 soyukke. Adapted code, bundled fonts, and other third-party
+components remain under their respective licenses as documented in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
