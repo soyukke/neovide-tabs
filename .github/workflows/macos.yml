@@ -30,6 +30,9 @@ jobs:
       - name: Build native host
         run: nix develop --command just native-build
 
+      - name: Test update discovery
+        run: nix develop --command just native-update-test
+
       - name: Build application bundle
         run: nix develop --command just native-release
 
@@ -47,8 +50,8 @@ jobs:
       - name: Upload release archive
         uses: actions/upload-artifact@v7
         with:
-          name: Neovide-Tabs-macOS
+          name: Neovide-Tabs-macOS-arm64
           path: |
-            spikes/macos-shell/.build/release/Neovide-Tabs-*-macOS-*.zip
+            spikes/macos-shell/.build/release/Neovide-Tabs-*-macOS-arm64.zip
             spikes/macos-shell/.build/release/latest.json
           if-no-files-found: error

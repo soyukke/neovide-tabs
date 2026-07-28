@@ -18,12 +18,357 @@ enum NativeLog {
         lifecycle.error("\(message, privacy: .public)")
     }
 
+    static func lifecycleInfo(_ message: String) {
+        lifecycle.info("\(message, privacy: .public)")
+    }
+
     static func runtimeError(_ message: String) {
         runtime.error("\(message, privacy: .public)")
     }
 
     static func sessionWarning(_ message: String) {
         session.warning("\(message, privacy: .public)")
+    }
+}
+
+struct AppSemanticVersion: Comparable {
+    let major: Int
+    let minor: Int
+    let patch: Int
+    let prerelease: [String]
+
+    init?(_ rawValue: String) {
+        var value = rawValue
+        if value.first == "v" {
+            value.removeFirst()
+        }
+
+        let buildParts = value.split(
+            separator: "+",
+            maxSplits: 1,
+            omittingEmptySubsequences: false
+        )
+        guard !buildParts[0].isEmpty,
+              buildParts.count == 1
+                  || Self.validIdentifiers(buildParts[1], rejectNumericLeadingZeroes: false)
+        else {
+            return nil
+        }
+
+        let versionParts = buildParts[0].split(
+            separator: "-",
+            maxSplits: 1,
+            omittingEmptySubsequences: false
+        )
+        let core = versionParts[0].split(separator: ".", omittingEmptySubsequences: false)
+        guard core.count == 3,
+              let major = Self.numericComponent(core[0]),
+              let minor = Self.numericComponent(core[1]),
+              let patch = Self.numericComponent(core[2])
+        else {
+            return nil
+        }
+
+        let prerelease: [String]
+        if versionParts.count == 2 {
+            guard Self.validIdentifiers(
+                versionParts[1],
+                rejectNumericLeadingZeroes: true
+            ) else {
+                return nil
+            }
+            prerelease = versionParts[1].split(separator: ".").map(String.init)
+        } else {
+            prerelease = []
+        }
+
+        self.major = major
+        self.minor = minor
+        self.patch = patch
+        self.prerelease = prerelease
+    }
+
+    static func < (lhs: AppSemanticVersion, rhs: AppSemanticVersion) -> Bool {
+        let lhsCore = [lhs.major, lhs.minor, lhs.patch]
+        let rhsCore = [rhs.major, rhs.minor, rhs.patch]
+        if lhsCore != rhsCore {
+            return lhsCore.lexicographicallyPrecedes(rhsCore)
+        }
+        if lhs.prerelease.isEmpty || rhs.prerelease.isEmpty {
+            return !lhs.prerelease.isEmpty && rhs.prerelease.isEmpty
+        }
+
+        for (lhsIdentifier, rhsIdentifier) in zip(lhs.prerelease, rhs.prerelease) {
+            if lhsIdentifier == rhsIdentifier {
+                continue
+            }
+            let lhsNumber = Int(lhsIdentifier)
+            let rhsNumber = Int(rhsIdentifier)
+            switch (lhsNumber, rhsNumber) {
+            case let (.some(lhsValue), .some(rhsValue)):
+                return lhsValue < rhsValue
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            case (.none, .none):
+                return lhsIdentifier < rhsIdentifier
+            }
+        }
+        return lhs.prerelease.count < rhs.prerelease.count
+    }
+
+    private static func numericComponent(_ value: Substring) -> Int? {
+        guard !value.isEmpty,
+              value.allSatisfy(\.isNumber),
+              value.count == 1 || value.first != "0"
+        else {
+            return nil
+        }
+        return Int(value)
+    }
+
+    private static func validIdentifiers(
+        _ value: Substring,
+        rejectNumericLeadingZeroes: Bool
+    ) -> Bool {
+        let identifiers = value.split(separator: ".", omittingEmptySubsequences: false)
+        guard !identifiers.isEmpty else {
+            return false
+        }
+        return identifiers.allSatisfy { identifier in
+            guard !identifier.isEmpty else {
+                return false
+            }
+            let validCharacters = identifier.utf8.allSatisfy { character in
+                (48...57).contains(character)
+                    || (65...90).contains(character)
+                    || (97...122).contains(character)
+                    || character == 45
+            }
+            let numericLeadingZero = rejectNumericLeadingZeroes
+                && identifier.count > 1
+                && identifier.first == "0"
+                && identifier.allSatisfy(\.isNumber)
+            return validCharacters && !numericLeadingZero
+        }
+    }
+}
+
+struct AvailableAppUpdate {
+    let version: String
+    let downloadURL: URL
+    let releaseNotesURL: URL
+}
+
+enum AppUpdateResult {
+    case current
+    case available(AvailableAppUpdate)
+}
+
+enum AppUpdateError: LocalizedError {
+    case invalidCurrentVersion
+    case invalidEndpoint
+    case invalidResponse
+    case invalidRelease
+    case missingArm64Asset
+    case responseTooLarge
+    case serverStatus(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidCurrentVersion:
+            return "The installed application version is unavailable."
+        case .invalidEndpoint:
+            return "The update service URL is invalid."
+        case .invalidResponse:
+            return "GitHub returned an invalid update response."
+        case .invalidRelease:
+            return "The latest GitHub Release has invalid version metadata."
+        case .missingArm64Asset:
+            return "The latest GitHub Release does not contain an Apple Silicon download."
+        case .responseTooLarge:
+            return "The update response exceeded the allowed size."
+        case let .serverStatus(status):
+            return "GitHub returned HTTP status \(status)."
+        }
+    }
+}
+
+final class AppUpdateChecker {
+    private struct GitHubRelease: Decodable {
+        struct Asset: Decodable {
+            let name: String
+            let downloadURL: URL
+
+            enum CodingKeys: String, CodingKey {
+                case name
+                case downloadURL = "browser_download_url"
+            }
+        }
+
+        let tagName: String
+        let releaseNotesURL: URL
+        let assets: [Asset]
+
+        enum CodingKeys: String, CodingKey {
+            case tagName = "tag_name"
+            case releaseNotesURL = "html_url"
+            case assets
+        }
+    }
+
+    private static let maximumResponseBytes = 1_048_576
+    private let endpoint: URL
+    private let session: URLSession
+
+    init(
+        endpoint: URL? = URL(
+            string: "https://api.github.com/repos/soyukke/neovide-tabs/releases/latest"
+        ),
+        session: URLSession = .shared
+    ) {
+        self.endpoint = endpoint ?? URL(fileURLWithPath: "/invalid-update-endpoint")
+        self.session = session
+    }
+
+    @discardableResult
+    func check(
+        currentVersion: String,
+        completion: @escaping (Result<AppUpdateResult, Error>) -> Void
+    ) -> URLSessionDataTask? {
+        guard endpoint.scheme == "https", endpoint.host == "api.github.com" else {
+            completion(.failure(AppUpdateError.invalidEndpoint))
+            return nil
+        }
+
+        var request = URLRequest(
+            url: endpoint,
+            cachePolicy: .reloadRevalidatingCacheData,
+            timeoutInterval: 15
+        )
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.setValue("Neovide-Tabs/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+
+        let task = session.dataTask(with: request) { data, response, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
+            guard let response = response as? HTTPURLResponse else {
+                completion(.failure(AppUpdateError.invalidResponse))
+                return
+            }
+            guard response.url?.scheme == "https",
+                  response.url?.host == "api.github.com"
+            else {
+                completion(.failure(AppUpdateError.invalidResponse))
+                return
+            }
+            guard response.statusCode == 200 else {
+                completion(.failure(AppUpdateError.serverStatus(response.statusCode)))
+                return
+            }
+            guard let data else {
+                completion(.failure(AppUpdateError.invalidResponse))
+                return
+            }
+            guard data.count <= Self.maximumResponseBytes else {
+                completion(.failure(AppUpdateError.responseTooLarge))
+                return
+            }
+
+            do {
+                completion(.success(try Self.evaluate(data: data, currentVersion: currentVersion)))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+        task.resume()
+        return task
+    }
+
+    static func evaluate(data: Data, currentVersion: String) throws -> AppUpdateResult {
+        guard let current = AppSemanticVersion(currentVersion) else {
+            throw AppUpdateError.invalidCurrentVersion
+        }
+        let release: GitHubRelease
+        do {
+            release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+        } catch {
+            throw AppUpdateError.invalidResponse
+        }
+        guard let latest = AppSemanticVersion(release.tagName),
+              release.releaseNotesURL.scheme == "https",
+              release.releaseNotesURL.host == "github.com",
+              release.releaseNotesURL.path.hasPrefix(
+                  "/soyukke/neovide-tabs/releases/tag/"
+              )
+        else {
+            throw AppUpdateError.invalidRelease
+        }
+        guard current < latest else {
+            return .current
+        }
+        let version = release.tagName.hasPrefix("v")
+            ? String(release.tagName.dropFirst())
+            : release.tagName
+        let expectedAssetName = "Neovide-Tabs-\(version)-macOS-arm64.zip"
+        let expectedAssetPath = "/soyukke/neovide-tabs/releases/download/"
+            + "\(release.tagName)/\(expectedAssetName)"
+        guard let asset = release.assets.first(where: { asset in
+            asset.name == expectedAssetName
+                && asset.downloadURL.scheme == "https"
+                && asset.downloadURL.host == "github.com"
+                && asset.downloadURL.path == expectedAssetPath
+        }) else {
+            throw AppUpdateError.missingArm64Asset
+        }
+        return .available(
+            AvailableAppUpdate(
+                version: version,
+                downloadURL: asset.downloadURL,
+                releaseNotesURL: release.releaseNotesURL
+            )
+        )
+    }
+
+    static func runSelfTests() -> Bool {
+        guard let prerelease = AppSemanticVersion("1.2.3-beta.2"),
+              let laterPrerelease = AppSemanticVersion("1.2.3-beta.11"),
+              let release = AppSemanticVersion("v1.2.3"),
+              let nextPatch = AppSemanticVersion("1.2.4"),
+              prerelease < laterPrerelease,
+              laterPrerelease < release,
+              release < nextPatch,
+              AppSemanticVersion("01.2.3") == nil,
+              AppSemanticVersion("1.2.3-beta.01") == nil
+        else {
+            return false
+        }
+
+        let response = """
+        {
+          "tag_name": "v1.2.4",
+          "html_url": "https://github.com/soyukke/neovide-tabs/releases/tag/v1.2.4",
+          "assets": [{
+            "name": "Neovide-Tabs-1.2.4-macOS-arm64.zip",
+            "browser_download_url": "https://github.com/soyukke/neovide-tabs/releases/download/v1.2.4/Neovide-Tabs-1.2.4-macOS-arm64.zip"
+          }]
+        }
+        """
+        guard let data = response.data(using: .utf8),
+              case let .available(update) = try? evaluate(
+                  data: data,
+                  currentVersion: "1.2.3"
+              ),
+              update.version == "1.2.4",
+              case .current = try? evaluate(data: data, currentVersion: "1.2.4")
+        else {
+            return false
+        }
+        return true
     }
 }
 
@@ -5003,6 +5348,9 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private var shellController: TerminalShellViewController?
+    private let updateChecker = AppUpdateChecker()
+    private var updateCheckID: UUID?
+    private var updateTask: URLSessionDataTask?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NativeLog.started()
@@ -5043,6 +5391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         writeSmokeWindowIdIfNeeded(window)
         scheduleSmokeShotIfNeeded(window)
+        scheduleAutomaticUpdateCheck()
     }
 
     private func presentFatalError(title: String, message: String) {
@@ -5122,11 +5471,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func checkForUpdates(_ sender: Any?) {
-        guard let url = URL(string: "https://github.com/soyukke/neovide-tabs/releases/latest") else {
-            NativeLog.lifecycleError("update_url_invalid")
+        beginUpdateCheck(interactive: true)
+    }
+
+    private func scheduleAutomaticUpdateCheck() {
+        guard ProcessInfo.processInfo.environment["NVTERM_NATIVE_SMOKE_SCENARIO"] == nil else {
             return
         }
-        NSWorkspace.shared.open(url)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.beginUpdateCheck(interactive: false)
+        }
+    }
+
+    private func beginUpdateCheck(interactive: Bool) {
+        guard let currentVersion = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String else {
+            if interactive {
+                presentUpdateError(AppUpdateError.invalidCurrentVersion)
+            }
+            return
+        }
+
+        if interactive {
+            updateTask?.cancel()
+        } else if updateTask != nil {
+            return
+        }
+
+        let checkID = UUID()
+        updateCheckID = checkID
+        updateTask = updateChecker.check(currentVersion: currentVersion) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, self.updateCheckID == checkID else {
+                    return
+                }
+                self.updateCheckID = nil
+                self.updateTask = nil
+                switch result {
+                case .success(.current):
+                    NativeLog.lifecycleInfo("update_check_current version=\(currentVersion)")
+                    if interactive {
+                        self.presentCurrentVersion(currentVersion)
+                    }
+                case let .success(.available(update)):
+                    NativeLog.lifecycleInfo(
+                        "update_available current=\(currentVersion) latest=\(update.version)"
+                    )
+                    self.presentAvailableUpdate(update, currentVersion: currentVersion)
+                case let .failure(error):
+                    NativeLog.lifecycleError(
+                        "update_check_failed error=\(error.localizedDescription)"
+                    )
+                    if interactive {
+                        self.presentUpdateError(error)
+                    }
+                }
+            }
+        }
+    }
+
+    private func presentAvailableUpdate(
+        _ update: AvailableAppUpdate,
+        currentVersion: String
+    ) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Neovide Tabs \(update.version) is available"
+        alert.informativeText = """
+        You are running \(currentVersion). The Apple Silicon build can be downloaded from GitHub.
+
+        The Release includes a checksum but is not authenticated with a publisher signature.
+        """
+        alert.addButton(withTitle: "Download Update")
+        alert.addButton(withTitle: "Release Notes")
+        alert.addButton(withTitle: "Later")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            NSWorkspace.shared.open(update.downloadURL)
+        case .alertSecondButtonReturn:
+            NSWorkspace.shared.open(update.releaseNotesURL)
+        default:
+            break
+        }
+    }
+
+    private func presentCurrentVersion(_ currentVersion: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Neovide Tabs is up to date"
+        alert.informativeText = "Version \(currentVersion) is the latest available release."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func presentUpdateError(_ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Unable to Check for Updates"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func buildMainMenu() {
@@ -5476,8 +5921,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.regular)
-app.run()
+if ProcessInfo.processInfo.environment["NVTERM_UPDATE_SELF_TEST"] == "1" {
+    if !AppUpdateChecker.runSelfTests() {
+        fatalError("update self-test failed")
+    }
+    print("update self-test passed")
+} else {
+    let app = NSApplication.shared
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    app.setActivationPolicy(.regular)
+    app.run()
+}

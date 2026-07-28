@@ -11,13 +11,10 @@ tmp_output="$build_dir/NativeShellSpike.$$"
 lock_dir="$build_dir/native-build.lock"
 minimum_macos="14.0"
 host_arch="$(uname -m)"
-case "$host_arch" in
-  arm64 | x86_64) ;;
-  *)
-    echo "unsupported macOS architecture: $host_arch" >&2
-    exit 64
-    ;;
-esac
+if [[ "$host_arch" != "arm64" ]]; then
+  echo "unsupported macOS architecture: $host_arch (Apple Silicon is required)" >&2
+  exit 64
+fi
 swift_target="$host_arch-apple-macos$minimum_macos"
 
 mkdir -p "$build_dir"

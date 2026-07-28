@@ -6,6 +6,9 @@ path builds the Rust core/runtime and launches the AppKit host. Terminal bytes
 flow through a PTY-backed `libghostty-vt` runtime, while the native host owns
 the macOS window, menu, tab UI, and AppKit event translation.
 
+Neovide Tabs supports Apple Silicon Macs running macOS 14 or newer. Intel Macs
+are not supported.
+
 ## Run
 
 ```sh
@@ -36,6 +39,7 @@ just neovim      # build and launch the native Neovim UI pane
 just native-build # build the AppKit/Metal host without launching it
 just native-package # build and locally verify a hardened-runtime .app
 just native-release # build a ZIP plus checksummed update manifest
+just native-update-test # test version ordering and GitHub update metadata
 just native-notarize # Developer ID sign, notarize, staple, and assess the .app
 just native-smoke # launch the native host briefly and write a PNG smoke shot
 just native-package-smoke # visually verify the exact Release .app executable
@@ -101,11 +105,23 @@ terminal and Neovim panes.
 
 ## Release
 
-`just native-release` creates
-`spikes/macos-shell/.build/release/Neovide-Tabs-<version>-macOS-<arch>.zip` and
-`latest.json` for the build host architecture. With no Apple credentials it
-produces an ad-hoc signed development artifact and labels the manifest
-accordingly.
+`just native-release` creates the Apple Silicon archive
+`spikes/macos-shell/.build/release/Neovide-Tabs-<version>-macOS-arm64.zip` and
+`latest.json`. With no Apple credentials it produces an ad-hoc signed artifact
+and labels the manifest as `development`.
+
+Pushing a tag that exactly matches the Cargo package version publishes a GitHub
+Release after the full verification and packaged-application smoke gates pass:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The tag workflow runs on GitHub's Apple Silicon runner, attaches the arm64 ZIP
+and manifest to the Release, generates release notes, and records GitHub build
+provenance. Workflow artifacts remain CI diagnostics; the stable distribution
+and update channel is GitHub Releases.
 
 For a production artifact, configure a Developer ID Application identity in
 `APPLE_SIGNING_IDENTITY` and a `notarytool` keychain profile name in
@@ -115,8 +131,20 @@ Gatekeeper assessment, and only then writes the release archive and SHA-256
 manifest. Signing credentials and notary secrets are never stored in this
 repository.
 
-The application exposes Help → Check for Updates…, which opens the repository's
-HTTPS release channel. Rust diagnostic verbosity is controlled by
+The packaged application checks GitHub's latest Release once after launch. It
+stays silent when current or offline and presents an alert only when a newer
+semantic version is available. Help → Check for Updates… performs the same
+check interactively and reports every outcome. Download Update opens the exact
+arm64 Release asset.
+
+The manifest checksum permits manual detection of accidental corruption but is
+fetched from the same GitHub trust boundary as the archive. It is not an
+independent publisher signature, so the application does not silently replace
+or execute itself. Automatic installation requires a separately trusted updater
+signature, such as an embedded Ed25519 public key; this does not require an
+Apple Developer ID.
+
+Rust diagnostic verbosity is controlled by
 `NVTERM_LOG=off|error|warn|info|debug|trace`; native lifecycle/runtime/session
 events use macOS unified logging.
 
