@@ -15,6 +15,8 @@ allowed to differ from the target design during a migration.
 - [0005: Retire the macroquad frontend](0005-retire-macroquad-frontend.md)
 - [0006: Use Neovim multigrid for the native Neovim pane](0006-use-neovim-multigrid-for-native-neovim-pane.md)
 - [0007: Vendor Neovide rendering assets for native Neovim quality](0007-vendor-neovide-rendering-assets.md)
+- [0008: Complete the native terminal interaction and pane model](0008-complete-native-terminal-interaction-and-pane-model.md)
+- [0009: Harden the native runtime and release pipeline](0009-harden-native-runtime-and-release-pipeline.md)
 
 ## Workflow
 

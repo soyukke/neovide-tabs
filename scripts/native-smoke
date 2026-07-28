@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-app="spikes/macos-shell/.build/NativeShellSpike"
+app="${NVTERM_NATIVE_EXECUTABLE:-spikes/macos-shell/.build/NativeShellSpike}"
 shot="spikes/macos-shell/.build/native-smoke.png"
 result_file="spikes/macos-shell/.build/native-smoke.result"
 window_id_file="spikes/macos-shell/.build/native-window-id"
@@ -14,6 +14,8 @@ NVTERM_NATIVE_SMOKE_SCENARIO=1 \
   "$app" &
 app_pid=$!
 
+# ShellCheck does not treat a trap handler name as a direct function call.
+# shellcheck disable=SC2329
 cleanup() {
   if kill -0 "$app_pid" 2>/dev/null; then
     kill "$app_pid" 2>/dev/null || true

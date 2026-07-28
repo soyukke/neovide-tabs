@@ -32,25 +32,16 @@ state, and terminal panes. Neovide-derived code is isolated behind a Rust
 renderer boundary while the terminal path continues using `libghostty-vt` for
 PTY terminal state.
 
-As the first migration step, the native Neovim path keeps a retained frame cache
-on the Rust side, emits dirty row updates after the initial full refresh, and
-maintains a Neovide-derived window line cache / scrollback animation state. The
-event path now produces `WindowDrawCommand`-style commands before AppKit receives
-the compatibility frame. This reduces snapshot-diff guessing and prepares the
-Skia/Metal renderer boundary.
-
-The Rust boundary exposes that retained state through
-`nvterm_nvim_renderer_model_json`. Schema version 1 includes background and
-cursor state plus retained window records with placement, window kind, z-order,
-hidden state, scroll animation position, and colored cell lines. That JSON
-boundary is the transition contract for a Skia/Metal surface.
+The native Neovim path maintains a Neovide-derived window line cache and
+scrollback animation state. UI events apply `WindowDrawCommand`-style updates
+directly to retained windows, which are consumed by the Skia/Metal renderer.
 
 The native host now sends the retained model to a Rust Skia/Metal adapter for
 the Neovim cell path. The adapter follows Neovide's macOS Metal pattern: wrap
 the current drawable texture as a Skia Metal backend render target, draw the
 retained windows, flush Skia, and let the Swift `MTKView` present the drawable.
-The AppKit row bridge and cursor overlay are disabled for the normal nvim path;
-cursor body and trail rendering live in the Rust Skia/Metal adapter.
+The AppKit row bridge and cursor overlay have been removed; cursor body and
+trail rendering live in the Rust Skia/Metal adapter.
 
 The retained model now includes viewport margins, scrollback line source, scroll
 position, and event-origin scroll hint metadata. The Rust Skia/Metal adapter
@@ -93,16 +84,15 @@ The popupmenu smoke enables Neovim `ext_popupmenu`, drives command-line
 completion through the normal input path, and verifies that the retained
 popupmenu model maps to visible Skia/Metal glyph pixels.
 
-The native nvim path reads scroll metadata from the retained model and does not
-call the older frame output. `nvterm_nvim_frame_json` remains only as a
-compatibility/debug frame output.
+The native nvim path reads scroll metadata from the retained model. The older
+JSON frame output and AppKit cell renderer were removed after the Skia/Metal
+path became mandatory.
 
 The normal terminal pane now uses the same Rust Skia/Metal adapter. The
 `libghostty-vt` frame is converted into a single retained normal window, terminal
 history scroll deltas are recorded as renderer scroll animation state, and
 cursor body/trail rendering is shared with the Neovim path. `native-smoke`
-requires `skia-frames=yes`, so the AppKit cell renderer cannot satisfy the
-terminal smoke gate.
+requires `skia-frames=yes`.
 
 Neovide MIT attribution and bundled font OFL attribution are tracked in
 `THIRD_PARTY_NOTICES.md`.

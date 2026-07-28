@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+  exec nix develop --command ./scripts/native-package-smoke "$@"
+fi
+
+./scripts/native-package
+app_path="spikes/macos-shell/.build/package/Neovide Tabs.app"
+executable="$app_path/Contents/MacOS/neovide-tabs"
+
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$app_path"
+test -s "$app_path/Contents/Resources/AppIcon.icns"
+test "$(
+  env -u SDKROOT -u DEVELOPER_DIR /usr/bin/vtool -show-build "$executable" |
+    awk '/minos/ {print $2; exit}'
+)" = "14.0"
+
+env -u NVTERM_FONT \
+  NVTERM_NATIVE_EXECUTABLE="$executable" \
+  ./scripts/native-smoke

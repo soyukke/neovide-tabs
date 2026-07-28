@@ -41,13 +41,25 @@ alias launch := terminal
 native-build:
     @./scripts/native-build
 
-# Build and run the native macOS terminal host.
-native-spike:
-    @just terminal
+# Build and verify an optimized, hardened-runtime macOS application bundle.
+native-package:
+    @./scripts/native-package
+
+# Sign, notarize, staple, and Gatekeeper-verify the macOS application bundle.
+native-notarize:
+    @./scripts/native-notarize
+
+# Build a distributable archive and a checksummed update manifest.
+native-release:
+    @./scripts/native-release
 
 # Build, launch briefly, capture the native shell view, and exit.
 native-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-smoke; else just native-build && ./scripts/native-smoke; fi
+
+# Launch and visually verify the exact Release executable inside the application bundle.
+native-package-smoke:
+    @./scripts/native-package-smoke
 
 # Verify terminal-pane Vim-style scroll produces Skia animation frames.
 terminal-vim-scroll-smoke:
@@ -61,15 +73,27 @@ terminal-bottom-input-smoke:
 terminal-exit-closes-tab-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-exit-closes-tab-smoke; else just native-build && ./scripts/native-terminal-exit-closes-tab-smoke; fi
 
-# Verify typing nvim in a terminal pane hands off to native Neovim rendering.
+# Verify versioned recursive pane session metadata round-trips.
+native-session-smoke:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-session-smoke; else just native-build && ./scripts/native-session-smoke; fi
+
+# Verify native window changes resize terminal pane grids.
+native-resize-smoke:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-resize-smoke; else just native-build && ./scripts/native-resize-smoke; fi
+
+# Repeat lifecycle, resize, session, input, and terminal/Neovim handoff smokes.
+native-soak iterations="3":
+    @./scripts/native-soak "{{iterations}}"
+
+# Verify the explicit native Neovim command replaces a terminal pane.
 terminal-nvim-handoff-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-nvim-handoff-smoke; else just native-build && ./scripts/native-terminal-nvim-handoff-smoke; fi
 
-# Verify handed-off Neovim inherits the terminal pane working directory.
+# Verify explicitly opened native Neovim inherits the terminal pane working directory.
 terminal-nvim-cwd-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-nvim-cwd-smoke; else just native-build && ./scripts/native-terminal-nvim-cwd-smoke; fi
 
-# Verify :qa from a handed-off native Neovim pane returns to terminal rendering.
+# Verify :qa from an explicitly opened native Neovim pane returns to terminal rendering.
 terminal-nvim-quit-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just terminal-nvim-quit-smoke; else just native-build && ./scripts/native-terminal-nvim-quit-smoke; fi
 
@@ -246,18 +270,6 @@ _nvim-smoke scenario:
     echo "$result"; \
     [[ "$result" == ok* ]]
 
-# Emit a tiny Kitty graphics protocol PNG in the current terminal.
-kitty-smoke:
-    @./scripts/kitty-image-smoke
-
-# Skip until the native Kitty graphics renderer is implemented.
-kitty-render-smoke:
-    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just kitty-render-smoke; else ./scripts/kitty-render-smoke; fi
-
-# Update the current neovide-tabs pane's agent status.
-agent-status state summary="":
-    @./scripts/nvterm-agent-status "{{state}}" "{{summary}}"
-
 # Check the Rust crate.
 check:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just check; else cargo check; fi
@@ -272,7 +284,28 @@ lint:
 
 # Run the checks enforced by the Git pre-commit hook.
 precommit:
-    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just precommit; else cargo fmt -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test; fi
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just precommit; else just secrets-staged && cargo fmt -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test && just ops-lint; fi
+
+# Scan staged changes before a commit without printing detected values.
+secrets-staged:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just secrets-staged; else gitleaks git --pre-commit --staged --redact=100 --no-banner .; fi
+
+# Scan every reachable Git ref and commit.
+secrets-history:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just secrets-history; else gitleaks git --log-opts=--all --redact=100 --no-banner .; fi
+
+# Scan current tracked and untracked repository files, excluding generated outputs.
+secrets-worktree:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just secrets-worktree; else gitleaks dir --redact=100 --no-banner .; fi
+
+# Run both publication-grade secret scans.
+secrets:
+    @just secrets-history
+    @just secrets-worktree
+
+# Lint release/smoke shell scripts and GitHub Actions workflows.
+ops-lint:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just ops-lint; else shellcheck scripts/native-build scripts/native-package scripts/native-package-smoke scripts/native-notarize scripts/native-release scripts/native-resize-smoke scripts/native-session-smoke scripts/native-smoke scripts/native-soak && actionlint .github/workflows/macos.yml; fi
 
 # Configure this clone to use the repository-managed Git hooks.
 install-hooks:
@@ -286,7 +319,7 @@ fmt:
 
 # Verify formatting, type checking, linting, and tests.
 verify:
-    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just verify; else cargo fmt -- --check && cargo check && cargo clippy --all-targets --all-features -- -D warnings && cargo test; fi
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just verify; else cargo fmt -- --check && cargo check && cargo clippy --all-targets --all-features -- -D warnings && cargo test && just ops-lint; fi
 
 # Remove Rust build artifacts.
 clean:

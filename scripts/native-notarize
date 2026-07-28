@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+  echo "APPLE_SIGNING_IDENTITY is required for notarization" >&2
+  exit 64
+fi
+if [[ -z "${APPLE_NOTARY_PROFILE:-}" ]]; then
+  echo "APPLE_NOTARY_PROFILE is required for notarization" >&2
+  exit 64
+fi
+
+APPLE_SIGNING_IDENTITY="$APPLE_SIGNING_IDENTITY" ./scripts/native-package
+
+package_root="spikes/macos-shell/.build/package"
+app_path="$package_root/Neovide Tabs.app"
+archive="$package_root/NeovideTabs-notarization.zip"
+
+rm -f -- "$archive"
+/usr/bin/ditto -c -k --keepParent "$app_path" "$archive"
+/usr/bin/xcrun notarytool submit \
+  "$archive" \
+  --keychain-profile "$APPLE_NOTARY_PROFILE" \
+  --wait
+/usr/bin/xcrun stapler staple "$app_path"
+/usr/bin/xcrun stapler validate "$app_path"
+/usr/sbin/spctl --assess --type execute --verbose=2 "$app_path"
+printf '%s\n' "$app_path"

@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+  exec nix develop --command ./scripts/native-package "$@"
+fi
+
+version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+build_number="${NVTERM_BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || printf '1')}"
+package_root="spikes/macos-shell/.build/package"
+app_path="$package_root/Neovide Tabs.app"
+contents="$app_path/Contents"
+binary="$contents/MacOS/neovide-tabs"
+plist_template="spikes/macos-shell/Info.plist.in"
+entitlements="spikes/macos-shell/NeovideTabs.entitlements"
+icon_source="assets/app-icon.png"
+iconset="$package_root/AppIcon.iconset"
+identity="${APPLE_SIGNING_IDENTITY:--}"
+minimum_macos="14.0"
+host_arch="$(uname -m)"
+case "$host_arch" in
+  arm64 | x86_64) ;;
+  *)
+    echo "unsupported macOS architecture: $host_arch" >&2
+    exit 64
+    ;;
+esac
+swift_target="$host_arch-apple-macos$minimum_macos"
+timestamp_option="--timestamp=none"
+if [[ "$identity" != "-" ]]; then
+  timestamp_option="--timestamp"
+fi
+
+case "$package_root" in
+  spikes/macos-shell/.build/package) ;;
+  *)
+    echo "refusing unexpected package root: $package_root" >&2
+    exit 64
+    ;;
+esac
+
+rm -rf -- "$app_path"
+mkdir -p "$contents/MacOS" "$contents/Resources"
+
+MACOSX_DEPLOYMENT_TARGET="$minimum_macos" cargo build --release --lib
+sdk="$(env -u SDKROOT -u DEVELOPER_DIR /usr/bin/xcrun --sdk macosx --show-sdk-path)"
+tmp_binary="$package_root/neovide-tabs.$$"
+trap 'rm -f "$tmp_binary"' EXIT INT TERM
+
+env -u SDKROOT -u DEVELOPER_DIR \
+  /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc \
+  -O \
+  -whole-module-optimization \
+  -sdk "$sdk" \
+  -target "$swift_target" \
+  spikes/macos-shell/NativeShellSpike.swift \
+  target/release/libneovide_tabs.a \
+  -framework AppKit \
+  -framework MetalKit \
+  -framework Metal \
+  -framework QuartzCore \
+  -lc++ \
+  -o "$tmp_binary"
+mv -f "$tmp_binary" "$binary"
+
+rm -rf -- "$iconset"
+mkdir -p "$iconset"
+while read -r points pixels suffix; do
+  /usr/bin/sips \
+    --resampleHeightWidth "$pixels" "$pixels" \
+    "$icon_source" \
+    --out "$iconset/icon_${points}x${points}${suffix}.png" \
+    >/dev/null
+done <<'SIZES'
+16 16
+16 32 @2x
+32 32
+32 64 @2x
+128 128
+128 256 @2x
+256 256
+256 512 @2x
+512 512
+512 1024 @2x
+SIZES
+/usr/bin/iconutil -c icns "$iconset" -o "$contents/Resources/AppIcon.icns"
+rm -rf -- "$iconset"
+
+sed \
+  -e "s/@VERSION@/$version/g" \
+  -e "s/@BUILD_NUMBER@/$build_number/g" \
+  -e "s/@MINIMUM_MACOS@/$minimum_macos/g" \
+  "$plist_template" >"$contents/Info.plist"
+plutil -lint "$contents/Info.plist"
+test -s "$contents/Resources/AppIcon.icns"
+actual_minimum="$(
+  env -u SDKROOT -u DEVELOPER_DIR /usr/bin/vtool -show-build "$binary" |
+    awk '/minos/ {print $2; exit}'
+)"
+if [[ "$actual_minimum" != "$minimum_macos" ]]; then
+  echo "unexpected binary minimum macOS: $actual_minimum (expected $minimum_macos)" >&2
+  exit 65
+fi
+
+/usr/bin/codesign \
+  --force \
+  --sign "$identity" \
+  --options runtime \
+  "$timestamp_option" \
+  --entitlements "$entitlements" \
+  "$app_path"
+
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$app_path"
+printf '%s\n' "$app_path"

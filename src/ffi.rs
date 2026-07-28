@@ -3,16 +3,20 @@ use std::{path::PathBuf, ptr};
 
 use serde::Serialize;
 
-use crate::core::{RendererContract, SplitAxis, TerminalCore};
+use crate::core::{SplitAxis, TerminalCore};
 use crate::neovim_runtime::NativeNeovimRuntime;
 use crate::skia_metal::{NativeSkiaMetalRenderer, SkiaRenderGeometry};
-use crate::terminal_runtime::{NativeTerminalRuntime, TerminalGridSize};
+use crate::terminal_runtime::{
+    NativeKeyInput, NativeMouseInput, NativeTerminalRuntime, TerminalGridSize, TerminalPoint,
+};
 
 const NVTERM_SPLIT_VERTICAL: u32 = 0;
 const NVTERM_SPLIT_HORIZONTAL: u32 = 1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn nvterm_core_create() -> *mut TerminalCore {
+    crate::logging::init();
+    log::info!(target: "lifecycle", "core_created");
     Box::into_raw(Box::new(TerminalCore::new()))
 }
 
@@ -30,11 +34,6 @@ pub unsafe extern "C" fn nvterm_core_destroy(handle: *mut TerminalCore) {
     unsafe {
         drop(Box::from_raw(handle));
     }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nvterm_core_tab_count(handle: *const TerminalCore) -> usize {
-    core_ref(handle).map_or(0, |core| core.snapshot().tabs.len())
 }
 
 #[unsafe(no_mangle)]
@@ -64,6 +63,11 @@ pub extern "C" fn nvterm_core_close_pane(handle: *mut TerminalCore, pane_id: usi
 #[unsafe(no_mangle)]
 pub extern "C" fn nvterm_core_select_tab(handle: *mut TerminalCore, index: usize) -> u8 {
     core_mut(handle).is_some_and(|core| core.select_tab(index)) as u8
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_core_select_pane(handle: *mut TerminalCore, pane_id: usize) -> u8 {
+    core_mut(handle).is_some_and(|core| core.select_pane(pane_id)) as u8
 }
 
 #[unsafe(no_mangle)]
@@ -105,17 +109,13 @@ pub extern "C" fn nvterm_core_snapshot_json(handle: *const TerminalCore) -> *mut
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn nvterm_renderer_contract_json() -> *mut c_char {
-    json_ptr(&RendererContract::current())
-}
-
-#[unsafe(no_mangle)]
 pub extern "C" fn nvterm_runtime_create(
     rows: u16,
     cols: u16,
     pixel_width: u16,
     pixel_height: u16,
 ) -> *mut NativeTerminalRuntime {
+    crate::logging::init();
     let size = TerminalGridSize {
         rows,
         cols,
@@ -124,7 +124,35 @@ pub extern "C" fn nvterm_runtime_create(
     };
     match NativeTerminalRuntime::spawn(size) {
         Ok(runtime) => Box::into_raw(Box::new(runtime)),
-        Err(_) => ptr::null_mut(),
+        Err(error) => {
+            log::error!(target: "terminal", "spawn_failed error={error:#}");
+            ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_create_in_cwd(
+    rows: u16,
+    cols: u16,
+    pixel_width: u16,
+    pixel_height: u16,
+    cwd: *const c_char,
+) -> *mut NativeTerminalRuntime {
+    crate::logging::init();
+    let size = TerminalGridSize {
+        rows,
+        cols,
+        pixel_width,
+        pixel_height,
+    };
+    let cwd = c_string(cwd).map(PathBuf::from);
+    match NativeTerminalRuntime::spawn_in_cwd(size, cwd.as_deref()) {
+        Ok(runtime) => Box::into_raw(Box::new(runtime)),
+        Err(error) => {
+            log::error!(target: "terminal", "spawn_in_cwd_failed error={error:#}");
+            ptr::null_mut()
+        }
     }
 }
 
@@ -186,6 +214,221 @@ pub unsafe extern "C" fn nvterm_runtime_write(
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
+///
+/// Non-null text pointers must point to their specified number of readable bytes.
+pub unsafe extern "C" fn nvterm_runtime_key(
+    handle: *mut NativeTerminalRuntime,
+    key_code: u16,
+    modifiers: u32,
+    text: *const u8,
+    text_len: usize,
+    unshifted: *const u8,
+    unshifted_len: usize,
+    repeat: u8,
+    released: u8,
+) -> u8 {
+    let Some(runtime) = runtime_mut(handle) else {
+        return 0;
+    };
+    // SAFETY: The caller promises readable buffers for non-null pointers.
+    let text = unsafe { optional_utf8(text, text_len) };
+    // SAFETY: The caller promises readable buffers for non-null pointers.
+    let Some(unshifted) = (unsafe { optional_utf8(unshifted, unshifted_len) }) else {
+        return 0;
+    };
+    runtime
+        .write_key(NativeKeyInput {
+            key_code,
+            modifiers,
+            text,
+            unshifted,
+            repeat: repeat != 0,
+            released: released != 0,
+        })
+        .unwrap_or(false) as u8
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// `bytes` must point to `len` readable UTF-8 bytes for the duration of the call.
+pub unsafe extern "C" fn nvterm_runtime_text(
+    handle: *mut NativeTerminalRuntime,
+    bytes: *const u8,
+    len: usize,
+) -> u8 {
+    let Some(runtime) = runtime_mut(handle) else {
+        return 0;
+    };
+    // SAFETY: The caller promises a readable buffer.
+    let Some(text) = (unsafe { optional_utf8(bytes, len) }) else {
+        return 0;
+    };
+    runtime.write_text(text).is_ok() as u8
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// `bytes` must point to `len` readable UTF-8 bytes for the duration of the call.
+pub unsafe extern "C" fn nvterm_runtime_paste(
+    handle: *mut NativeTerminalRuntime,
+    bytes: *const u8,
+    len: usize,
+) -> u8 {
+    let Some(runtime) = runtime_mut(handle) else {
+        return 0;
+    };
+    // SAFETY: The caller promises a readable buffer.
+    let Some(text) = (unsafe { optional_utf8(bytes, len) }) else {
+        return 0;
+    };
+    runtime.write_paste(text).is_ok() as u8
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_mouse(
+    handle: *mut NativeTerminalRuntime,
+    action: u32,
+    button: i32,
+    modifiers: u32,
+    x: f32,
+    y: f32,
+    cell_width: u32,
+    cell_height: u32,
+) -> u8 {
+    let Some(runtime) = runtime_mut(handle) else {
+        return 0;
+    };
+    let Some(action) = mouse_action(action) else {
+        return 0;
+    };
+    let Some(button) = mouse_button(button) else {
+        return 0;
+    };
+    runtime
+        .write_mouse(NativeMouseInput {
+            action,
+            button,
+            modifiers,
+            x,
+            y,
+            cell_width,
+            cell_height,
+        })
+        .unwrap_or(false) as u8
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_focus(handle: *mut NativeTerminalRuntime, focused: u8) -> u8 {
+    let Some(runtime) = runtime_mut(handle) else {
+        return 0;
+    };
+    runtime.write_focus(focused != 0).unwrap_or(false) as u8
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_select(
+    handle: *mut NativeTerminalRuntime,
+    start_row: u32,
+    start_col: u16,
+    end_row: u32,
+    end_col: u16,
+    rectangular: u8,
+) -> u8 {
+    runtime_ref(handle).is_some_and(|runtime| {
+        runtime
+            .select(
+                TerminalPoint {
+                    row: start_row,
+                    col: start_col,
+                },
+                TerminalPoint {
+                    row: end_row,
+                    col: end_col,
+                },
+                rectangular != 0,
+            )
+            .is_ok()
+    }) as u8
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_select_all(handle: *const NativeTerminalRuntime) -> u8 {
+    runtime_ref(handle).is_some_and(|runtime| runtime.select_all().is_ok()) as u8
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_clear_selection(handle: *const NativeTerminalRuntime) -> u8 {
+    runtime_ref(handle).is_some_and(|runtime| runtime.clear_selection().is_ok()) as u8
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_selected_text(
+    handle: *const NativeTerminalRuntime,
+) -> *mut c_char {
+    runtime_ref(handle)
+        .and_then(|runtime| runtime.selected_text().ok().flatten())
+        .map_or(ptr::null_mut(), string_ptr)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_hyperlink(
+    handle: *const NativeTerminalRuntime,
+    row: u32,
+    col: u16,
+) -> *mut c_char {
+    runtime_ref(handle)
+        .and_then(|runtime| {
+            runtime
+                .hyperlink_at(TerminalPoint { row, col })
+                .ok()
+                .flatten()
+        })
+        .map_or(ptr::null_mut(), string_ptr)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_title(handle: *const NativeTerminalRuntime) -> *mut c_char {
+    runtime_ref(handle)
+        .and_then(NativeTerminalRuntime::title)
+        .map_or(ptr::null_mut(), string_ptr)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_take_bell_count(handle: *const NativeTerminalRuntime) -> u64 {
+    runtime_ref(handle).map_or(0, NativeTerminalRuntime::take_bell_count)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_set_option_as_alt(
+    handle: *mut NativeTerminalRuntime,
+    enabled: u8,
+) -> u8 {
+    let Some(runtime) = runtime_mut(handle) else {
+        return 0;
+    };
+    runtime.set_option_as_alt(enabled != 0);
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_find(
+    handle: *mut NativeTerminalRuntime,
+    query: *const c_char,
+    backwards: u8,
+) -> u8 {
+    let Some(runtime) = runtime_mut(handle) else {
+        return 0;
+    };
+    let Some(query) = c_string(query) else {
+        return 0;
+    };
+    runtime.find(&query, backwards != 0).unwrap_or(false) as u8
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn nvterm_runtime_drain(handle: *mut NativeTerminalRuntime) -> u8 {
     let Some(runtime) = runtime_mut(handle) else {
         return 0;
@@ -202,6 +445,11 @@ pub extern "C" fn nvterm_runtime_exited(handle: *mut NativeTerminalRuntime) -> u
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_wakeup_fd(handle: *const NativeTerminalRuntime) -> i32 {
+    runtime_ref(handle).map_or(-1, NativeTerminalRuntime::wakeup_fd)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn nvterm_runtime_scroll(
     handle: *mut NativeTerminalRuntime,
     requested_rows: isize,
@@ -210,17 +458,6 @@ pub extern "C" fn nvterm_runtime_scroll(
         return 0;
     };
     runtime.scroll_delta(requested_rows).unwrap_or(0)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn nvterm_runtime_frame_json(handle: *mut NativeTerminalRuntime) -> *mut c_char {
-    let Some(runtime) = runtime_mut(handle) else {
-        return ptr::null_mut();
-    };
-    match runtime.frame() {
-        Ok(frame) => json_ptr(&frame),
-        Err(_) => ptr::null_mut(),
-    }
 }
 
 #[unsafe(no_mangle)]
@@ -275,9 +512,13 @@ pub extern "C" fn nvterm_nvim_create_in_cwd(
 }
 
 fn create_nvim_runtime(size: TerminalGridSize, cwd: Option<PathBuf>) -> *mut NativeNeovimRuntime {
+    crate::logging::init();
     match NativeNeovimRuntime::spawn_in_directory(size, cwd) {
         Ok(runtime) => Box::into_raw(Box::new(runtime)),
-        Err(_) => ptr::null_mut(),
+        Err(error) => {
+            log::error!(target: "neovim", "spawn_failed error={error:#}");
+            ptr::null_mut()
+        }
     }
 }
 
@@ -396,14 +637,8 @@ pub extern "C" fn nvterm_nvim_exited(handle: *mut NativeNeovimRuntime) -> u8 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn nvterm_nvim_frame_json(handle: *mut NativeNeovimRuntime) -> *mut c_char {
-    let Some(runtime) = nvim_mut(handle) else {
-        return ptr::null_mut();
-    };
-    match runtime.frame() {
-        Ok(frame) => json_ptr(&frame),
-        Err(_) => ptr::null_mut(),
-    }
+pub extern "C" fn nvterm_nvim_wakeup_fd(handle: *const NativeNeovimRuntime) -> i32 {
+    nvim_ref(handle).map_or(-1, NativeNeovimRuntime::wakeup_fd)
 }
 
 #[unsafe(no_mangle)]
@@ -457,8 +692,11 @@ pub unsafe extern "C" fn nvterm_skia_metal_render_nvim(
     height: i32,
     origin_x: f32,
     origin_y: f32,
+    content_width: f32,
+    content_height: f32,
     cell_width: f32,
     cell_height: f32,
+    clear: u8,
 ) -> u8 {
     let Some(renderer) = skia_renderer_mut(renderer) else {
         return 0;
@@ -471,11 +709,13 @@ pub unsafe extern "C" fn nvterm_skia_metal_render_nvim(
         height,
         origin_x,
         origin_y,
+        content_width,
+        content_height,
         cell_width,
         cell_height,
     };
     // SAFETY: The caller guarantees the renderer, nvim runtime, and drawable texture are live.
-    (unsafe { renderer.render_nvim(nvim, texture, geometry) }) as u8
+    (unsafe { renderer.render_nvim(nvim, texture, geometry, clear != 0) }) as u8
 }
 
 #[unsafe(no_mangle)]
@@ -490,8 +730,11 @@ pub unsafe extern "C" fn nvterm_skia_metal_render_terminal(
     height: i32,
     origin_x: f32,
     origin_y: f32,
+    content_width: f32,
+    content_height: f32,
     cell_width: f32,
     cell_height: f32,
+    clear: u8,
 ) -> u8 {
     let Some(renderer) = skia_renderer_mut(renderer) else {
         return 0;
@@ -504,11 +747,13 @@ pub unsafe extern "C" fn nvterm_skia_metal_render_terminal(
         height,
         origin_x,
         origin_y,
+        content_width,
+        content_height,
         cell_width,
         cell_height,
     };
     // SAFETY: The caller guarantees the renderer, terminal runtime, and drawable texture are live.
-    (unsafe { renderer.render_terminal(runtime, texture, geometry) }) as u8
+    (unsafe { renderer.render_terminal(runtime, texture, geometry, clear != 0) }) as u8
 }
 
 #[unsafe(no_mangle)]
@@ -516,6 +761,20 @@ pub extern "C" fn nvterm_skia_metal_needs_animation_frame(
     renderer: *const NativeSkiaMetalRenderer,
 ) -> u8 {
     skia_renderer_ref(renderer).is_some_and(NativeSkiaMetalRenderer::needs_animation_frame) as u8
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_skia_metal_forget_runtime(
+    renderer: *mut NativeSkiaMetalRenderer,
+    runtime: *const c_void,
+) {
+    let Some(renderer) = skia_renderer_mut(renderer) else {
+        return;
+    };
+    if runtime.is_null() {
+        return;
+    }
+    renderer.forget_runtime(runtime as usize);
 }
 
 #[unsafe(no_mangle)]
@@ -596,6 +855,15 @@ fn nvim_mut<'a>(handle: *mut NativeNeovimRuntime) -> Option<&'a mut NativeNeovim
     unsafe { handle.as_mut() }
 }
 
+fn nvim_ref<'a>(handle: *const NativeNeovimRuntime) -> Option<&'a NativeNeovimRuntime> {
+    if handle.is_null() {
+        return None;
+    }
+
+    // SAFETY: Callers pass an opaque pointer created by `nvterm_nvim_create`.
+    unsafe { handle.as_ref() }
+}
+
 fn skia_renderer_mut<'a>(
     handle: *mut NativeSkiaMetalRenderer,
 ) -> Option<&'a mut NativeSkiaMetalRenderer> {
@@ -630,9 +898,49 @@ fn c_string(value: *const c_char) -> Option<String> {
         .map(str::to_owned)
 }
 
+unsafe fn optional_utf8<'a>(value: *const u8, len: usize) -> Option<&'a str> {
+    if value.is_null() {
+        return None;
+    }
+    // SAFETY: The caller guarantees `value` points to `len` readable bytes.
+    std::str::from_utf8(unsafe { std::slice::from_raw_parts(value, len) }).ok()
+}
+
+fn mouse_action(value: u32) -> Option<libghostty_vt::mouse::Action> {
+    match value {
+        0 => Some(libghostty_vt::mouse::Action::Press),
+        1 => Some(libghostty_vt::mouse::Action::Release),
+        2 => Some(libghostty_vt::mouse::Action::Motion),
+        _ => None,
+    }
+}
+
+fn mouse_button(value: i32) -> Option<Option<libghostty_vt::mouse::Button>> {
+    use libghostty_vt::mouse::Button;
+    Some(match value {
+        -1 => None,
+        0 => Some(Button::Left),
+        1 => Some(Button::Right),
+        2 => Some(Button::Middle),
+        3 => Some(Button::Four),
+        4 => Some(Button::Five),
+        5 => Some(Button::Six),
+        6 => Some(Button::Seven),
+        7 => Some(Button::Eight),
+        8 => Some(Button::Nine),
+        9 => Some(Button::Ten),
+        10 => Some(Button::Eleven),
+        _ => return None,
+    })
+}
+
 fn json_ptr(value: &impl Serialize) -> *mut c_char {
-    let Ok(json) = serde_json::to_string(value) else {
-        return ptr::null_mut();
+    let json = match serde_json::to_string(value) {
+        Ok(json) => json,
+        Err(error) => {
+            log::error!(target: "ffi", "json_encode_failed error={error}");
+            return ptr::null_mut();
+        }
     };
     string_ptr(json)
 }
@@ -662,14 +970,6 @@ mod tests {
         }
         assert!(json.contains("\"active_tab\":1"));
         assert!(json.contains("\"session 2\""));
-    }
-
-    #[test]
-    fn ffi_renderer_contract_mentions_metal() {
-        let json = owned_string(nvterm_renderer_contract_json());
-
-        assert!(json.contains("\"backend\":\"metal\""));
-        assert!(json.contains("\"view\":\"MTKView\""));
     }
 
     fn owned_string(value: *mut c_char) -> String {

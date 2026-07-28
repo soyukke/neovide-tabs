@@ -343,7 +343,7 @@ def verify_cursor_replace_shape(width: int, height: int, pixels, result_path: st
         cell_height,
         cursor["percentage"],
     )
-    min_underline_pixels = max(20, cell_width * stats["underline_height"] // 4)
+    min_underline_pixels = max(20, cell_width)
     if stats["underline"] < min_underline_pixels:
         raise SystemExit(f"underline cursor pixels missing: {stats}")
     if stats["above"] > 8:

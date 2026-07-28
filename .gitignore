@@ -1,2 +1,13 @@
 /target
 spikes/macos-shell/.build
+.DS_Store
+.direnv/
+.env
+.env.*
+!.env.example
+*.key
+*.mobileprovision
+*.p12
+*.pem
+*.swp
+secrets/

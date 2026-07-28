@@ -1,21 +1,31 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
     env,
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     rc::Rc,
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver},
+    },
     thread,
+    time::Duration,
 };
 
 use anyhow::Result;
 use libghostty_vt::{
     RenderState, Terminal, TerminalOptions,
+    fmt::Format,
+    key::{self, Key, Mods, OptionAsAlt},
+    kitty::graphics::{self, ImageFormat, PlacementIterator},
+    mouse, paste,
     render::{CellIteration, CellIterator, CursorVisualStyle, RowIteration, RowIterator, Snapshot},
     screen::Screen,
-    style::{RgbColor, Underline},
-    terminal::ScrollViewport,
+    selection::{FormatOptions, SelectWordOptions, Selection},
+    style::{RgbColor, StyleColor, Underline},
+    terminal::{Mode, Point, PointCoordinate, ScrollViewport},
 };
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::Serialize;
@@ -24,6 +34,7 @@ use crate::neovide_render::{
     NeovideLine, NeovideRenderedWindowCache, NeovideRenderedWindowPlacement,
     NeovideRendererModelSnapshot, NeovideWindowDrawCommand, NeovideWindowKind,
 };
+use crate::wakeup::{WakeupReceiver, WakeupSender};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerminalGridSize {
@@ -42,28 +53,48 @@ impl TerminalGridSize {
             pixel_height: self.pixel_height,
         }
     }
+
+    fn cell_pixel_size(self) -> (u32, u32) {
+        (
+            u32::from(self.pixel_width) / u32::from(self.cols.max(1)),
+            u32::from(self.pixel_height) / u32::from(self.rows.max(1)),
+        )
+    }
 }
 
 pub struct NativeTerminalRuntime {
     pty: RuntimePty,
     pty_replies: Rc<RefCell<Vec<u8>>>,
+    bell_count: Rc<Cell<u64>>,
     terminal: Terminal<'static, 'static>,
+    key_encoder: key::Encoder<'static>,
+    mouse_encoder: mouse::Encoder<'static>,
+    mouse_button_pressed: bool,
+    option_as_alt: bool,
     renderer: TerminalFrameRenderer,
     renderer_model: TerminalRendererModel,
     size: TerminalGridSize,
     current_working_directory: Option<PathBuf>,
+    last_search: Option<TerminalSearchState>,
+    kitty_image_cache: RefCell<HashMap<u32, CachedKittyImage>>,
     exited: bool,
 }
 
 impl NativeTerminalRuntime {
     pub fn spawn(size: TerminalGridSize) -> Result<Self> {
-        let pty = RuntimePty::spawn(size)?;
+        Self::spawn_in_cwd(size, None)
+    }
+
+    pub fn spawn_in_cwd(size: TerminalGridSize, cwd: Option<&Path>) -> Result<Self> {
+        let pty = RuntimePty::spawn(size, cwd)?;
         let pty_replies = Rc::new(RefCell::new(Vec::new()));
+        let bell_count = Rc::new(Cell::new(0_u64));
         let mut terminal = Terminal::new(TerminalOptions {
             cols: size.cols,
             rows: size.rows,
             max_scrollback: 100_000,
         })?;
+        configure_kitty_graphics(&mut terminal)?;
 
         terminal.on_pty_write({
             let pty_replies = Rc::clone(&pty_replies);
@@ -71,33 +102,324 @@ impl NativeTerminalRuntime {
                 pty_replies.borrow_mut().extend_from_slice(data);
             }
         })?;
+        terminal.on_bell({
+            let bell_count = Rc::clone(&bell_count);
+            move |_term| bell_count.set(bell_count.get().saturating_add(1))
+        })?;
 
-        Ok(Self {
+        let mut runtime = Self {
             pty,
             pty_replies,
+            bell_count,
             terminal,
+            key_encoder: key::Encoder::new()?,
+            mouse_encoder: mouse::Encoder::new()?,
+            mouse_button_pressed: false,
+            option_as_alt: true,
             renderer: TerminalFrameRenderer::new()?,
             renderer_model: TerminalRendererModel::new(size),
             size,
-            current_working_directory: env::current_dir().ok(),
+            current_working_directory: cwd
+                .map(Path::to_path_buf)
+                .or_else(|| env::current_dir().ok()),
+            last_search: None,
+            kitty_image_cache: RefCell::new(HashMap::new()),
             exited: false,
-        })
+        };
+        runtime.resize_terminal_cells(size)?;
+        Ok(runtime)
     }
 
     pub fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
         self.pty.write_all(bytes)
     }
 
+    pub fn write_key(&mut self, input: NativeKeyInput<'_>) -> Result<bool> {
+        let Some(key) = macos_key(input.key_code) else {
+            return Ok(false);
+        };
+        self.key_encoder
+            .set_options_from_terminal(&self.terminal)
+            .set_macos_option_as_alt(if self.option_as_alt {
+                OptionAsAlt::True
+            } else {
+                OptionAsAlt::False
+            });
+        let mut event = key::Event::new()?;
+        let text = if input.released {
+            None
+        } else {
+            input.text.filter(|text| valid_key_text(text))
+        };
+        event
+            .set_action(if input.released {
+                key::Action::Release
+            } else if input.repeat {
+                key::Action::Repeat
+            } else {
+                key::Action::Press
+            })
+            .set_key(key)
+            .set_mods(native_key_mods(input.modifiers))
+            .set_composing(false)
+            .set_utf8(text);
+        if let Some(codepoint) = input.unshifted.chars().next() {
+            event.set_unshifted_codepoint(codepoint);
+        }
+        let mut encoded = Vec::with_capacity(32);
+        self.key_encoder.encode_to_vec(&event, &mut encoded)?;
+        if encoded.is_empty() {
+            return Ok(false);
+        }
+        self.pty.write_all(&encoded)?;
+        self.scroll_to_bottom_after_input();
+        Ok(true)
+    }
+
+    pub fn write_text(&mut self, text: &str) -> Result<()> {
+        self.pty.write_all(text.as_bytes())?;
+        self.scroll_to_bottom_after_input();
+        Ok(())
+    }
+
+    pub fn write_paste(&mut self, text: &str) -> Result<()> {
+        let mut data = text.as_bytes().to_vec();
+        let bracketed = self.terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false);
+        let mut encoded = vec![0; data.len().saturating_add(32)];
+        let written = match paste::encode(&mut data, bracketed, &mut encoded) {
+            Ok(written) => written,
+            Err(libghostty_vt::Error::OutOfSpace { required }) => {
+                encoded.resize(required, 0);
+                paste::encode(&mut data, bracketed, &mut encoded)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        self.pty.write_all(&encoded[..written])?;
+        self.scroll_to_bottom_after_input();
+        Ok(())
+    }
+
+    pub fn write_mouse(&mut self, input: NativeMouseInput) -> Result<bool> {
+        if !self.terminal.is_mouse_tracking().unwrap_or(false) {
+            return Ok(false);
+        }
+        self.mouse_encoder
+            .set_options_from_terminal(&self.terminal)
+            .set_size(mouse::EncoderSize {
+                screen_width: self.size.pixel_width.into(),
+                screen_height: self.size.pixel_height.into(),
+                cell_width: input.cell_width.max(1),
+                cell_height: input.cell_height.max(1),
+                padding_top: 0,
+                padding_bottom: 0,
+                padding_right: 0,
+                padding_left: 0,
+            })
+            .set_any_button_pressed(self.mouse_button_pressed);
+        let mut event = mouse::Event::new()?;
+        event
+            .set_action(input.action)
+            .set_button(input.button)
+            .set_mods(native_key_mods(input.modifiers))
+            .set_position(mouse::Position {
+                x: input.x,
+                y: input.y,
+            });
+        let mut encoded = Vec::with_capacity(32);
+        self.mouse_encoder.encode_to_vec(&event, &mut encoded)?;
+        if encoded.is_empty() {
+            return Ok(false);
+        }
+        if input.button.is_some() {
+            self.mouse_button_pressed = input.action != mouse::Action::Release;
+        }
+        self.pty.write_all(&encoded)?;
+        Ok(true)
+    }
+
+    pub fn write_focus(&mut self, focused: bool) -> Result<bool> {
+        if !self.terminal.mode(Mode::FOCUS_EVENT)? {
+            return Ok(false);
+        }
+        self.pty
+            .write_all(if focused { b"\x1b[I" } else { b"\x1b[O" })?;
+        Ok(true)
+    }
+
+    pub fn select(
+        &self,
+        start: TerminalPoint,
+        end: TerminalPoint,
+        rectangular: bool,
+    ) -> Result<()> {
+        let start = self.viewport_grid_ref(start)?;
+        let end = self.viewport_grid_ref(end)?;
+        let selection = Selection::new(start, end, rectangular);
+        self.terminal.set_selection(Some(&selection))?;
+        Ok(())
+    }
+
+    pub fn select_all(&self) -> Result<()> {
+        let selection = self.terminal.select_all()?;
+        self.terminal.set_selection(selection.as_ref())?;
+        Ok(())
+    }
+
+    pub fn clear_selection(&self) -> Result<()> {
+        self.terminal.set_selection(None)?;
+        Ok(())
+    }
+
+    pub fn selected_text(&self) -> Result<Option<String>> {
+        let bytes = self.terminal.format_selection_alloc(
+            None,
+            FormatOptions::new()
+                .with_emit_format(Format::Plain)
+                .with_unwrap(true)
+                .with_trim(true),
+        )?;
+        Ok(bytes.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
+    pub fn hyperlink_at(&self, point: TerminalPoint) -> Result<Option<String>> {
+        let grid_ref = self.viewport_grid_ref(point)?;
+        let mut buffer = vec![0; 256];
+        let written = match grid_ref.hyperlink_uri(&mut buffer) {
+            Ok(0) => 0,
+            Ok(written) => written,
+            Err(libghostty_vt::Error::OutOfSpace { required }) => {
+                buffer.resize(required, 0);
+                grid_ref.hyperlink_uri(&mut buffer)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if written > 0 {
+            return Ok(Some(
+                String::from_utf8_lossy(&buffer[..written]).into_owned(),
+            ));
+        }
+        let boundaries = [' ', '\t'];
+        let Some(selection) = self
+            .terminal
+            .select_word(SelectWordOptions::new(grid_ref).with_boundary_codepoints(&boundaries))?
+        else {
+            return Ok(None);
+        };
+        let value = self.terminal.format_selection_alloc(
+            None,
+            FormatOptions::new()
+                .with_emit_format(Format::Plain)
+                .with_unwrap(true)
+                .with_trim(true)
+                .with_selection(&selection),
+        )?;
+        Ok(value.and_then(|value| normalize_terminal_url(&String::from_utf8_lossy(&value))))
+    }
+
+    pub fn title(&self) -> Option<String> {
+        self.terminal
+            .title()
+            .ok()
+            .filter(|title| !title.is_empty())
+            .map(str::to_owned)
+    }
+
+    pub fn take_bell_count(&self) -> u64 {
+        self.bell_count.replace(0)
+    }
+
+    pub fn set_option_as_alt(&mut self, enabled: bool) {
+        self.option_as_alt = enabled;
+    }
+
+    pub fn find(&mut self, query: &str, backwards: bool) -> Result<bool> {
+        if query.is_empty() {
+            return Ok(false);
+        }
+        let total_rows = self.terminal.total_rows()?;
+        if total_rows == 0 {
+            return Ok(false);
+        }
+        let scrollbar = self.terminal.scrollbar()?;
+        let start_row = self.search_start_row(query, backwards, total_rows, scrollbar.offset);
+        for offset in 0..total_rows {
+            let row = if backwards {
+                (start_row + total_rows - offset % total_rows) % total_rows
+            } else {
+                (start_row + offset) % total_rows
+            };
+            let Some((start_col, end_col)) = self.find_in_screen_row(row, query)? else {
+                continue;
+            };
+            self.reveal_search_match(row, scrollbar.len)?;
+            self.set_screen_selection(row, start_col, end_col)?;
+            self.last_search = Some(TerminalSearchState {
+                query: query.to_owned(),
+                row,
+            });
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn kitty_placements(&self) -> Result<Vec<KittyImagePlacementSnapshot>> {
+        let graphics = self.terminal.kitty_graphics()?;
+        let mut iterator = PlacementIterator::new()?;
+        let mut placements = iterator.update(&graphics)?;
+        let mut output = Vec::new();
+        let mut visible_images = HashSet::new();
+        while let Some(placement) = placements.next() {
+            let image_id = placement.image_id()?;
+            visible_images.insert(image_id);
+            let Some(image) = graphics.image(image_id) else {
+                continue;
+            };
+            let info = placement.placement_render_info(&image, &self.terminal)?;
+            if !info.viewport_visible {
+                continue;
+            }
+            let image_number = image.number()?;
+            let rgba = self.cached_kitty_rgba(image_id, image_number, &image)?;
+            output.push(KittyImagePlacementSnapshot {
+                image_id,
+                image_number,
+                z: placement.z()?,
+                viewport_col: info.viewport_col,
+                viewport_row: info.viewport_row,
+                x_offset: placement.x_offset()?,
+                y_offset: placement.y_offset()?,
+                pixel_width: info.pixel_width,
+                pixel_height: info.pixel_height,
+                source_x: info.source_x,
+                source_y: info.source_y,
+                source_width: info.source_width,
+                source_height: info.source_height,
+                image_width: image.width()?,
+                image_height: image.height()?,
+                rgba,
+            });
+        }
+        self.kitty_image_cache
+            .borrow_mut()
+            .retain(|image_id, _| visible_images.contains(image_id));
+        output.sort_by_key(|placement| placement.z);
+        Ok(output)
+    }
+
+    fn cached_kitty_rgba(
+        &self,
+        image_id: u32,
+        image_number: u32,
+        image: &graphics::Image<'_>,
+    ) -> Result<Arc<[u8]>> {
+        cached_kitty_rgba(&self.kitty_image_cache, image_id, image_number, image)
+    }
+
     pub fn resize(&mut self, size: TerminalGridSize) -> Result<()> {
         if self.size == size {
             return Ok(());
         }
-        self.terminal.resize(
-            size.cols,
-            size.rows,
-            size.pixel_width.into(),
-            size.pixel_height.into(),
-        )?;
+        self.resize_terminal_cells(size)?;
         self.pty.resize(size)?;
         self.renderer_model.resize(size);
         self.size = size;
@@ -105,6 +427,7 @@ impl NativeTerminalRuntime {
     }
 
     pub fn drain(&mut self) -> Result<bool> {
+        self.pty.clear_wakeup();
         let mut changed = false;
         while let Ok(bytes) = self.pty.rx.try_recv() {
             self.terminal.vt_write(&bytes);
@@ -121,6 +444,10 @@ impl NativeTerminalRuntime {
             changed = true;
         }
         Ok(changed)
+    }
+
+    pub fn wakeup_fd(&self) -> i32 {
+        self.pty.wakeup_fd()
     }
 
     pub fn is_exited(&mut self) -> bool {
@@ -165,6 +492,114 @@ impl NativeTerminalRuntime {
         self.current_working_directory.clone()
     }
 
+    fn viewport_grid_ref(
+        &self,
+        point: TerminalPoint,
+    ) -> Result<libghostty_vt::screen::GridRef<'_>> {
+        self.terminal
+            .grid_ref(Point::Viewport(PointCoordinate {
+                x: point.col.min(self.size.cols.saturating_sub(1)),
+                y: point.row.min(u32::from(self.size.rows.saturating_sub(1))),
+            }))
+            .map_err(Into::into)
+    }
+
+    fn scroll_to_bottom_after_input(&mut self) {
+        self.terminal.scroll_viewport(ScrollViewport::Bottom);
+    }
+
+    fn resize_terminal_cells(&mut self, size: TerminalGridSize) -> Result<()> {
+        let (cell_width, cell_height) = size.cell_pixel_size();
+        self.terminal
+            .resize(size.cols, size.rows, cell_width.max(1), cell_height.max(1))?;
+        Ok(())
+    }
+
+    fn search_start_row(
+        &self,
+        query: &str,
+        backwards: bool,
+        total_rows: usize,
+        viewport_top: u64,
+    ) -> usize {
+        if let Some(search) = self
+            .last_search
+            .as_ref()
+            .filter(|search| search.query == query)
+        {
+            return if backwards {
+                search.row.checked_sub(1).unwrap_or(total_rows - 1)
+            } else {
+                (search.row + 1) % total_rows
+            };
+        }
+        let top = usize::try_from(viewport_top)
+            .unwrap_or(usize::MAX)
+            .min(total_rows - 1);
+        if backwards {
+            top.saturating_add(usize::from(self.size.rows).saturating_sub(1))
+                .min(total_rows - 1)
+        } else {
+            top
+        }
+    }
+
+    fn find_in_screen_row(&self, row: usize, query: &str) -> Result<Option<(u16, u16)>> {
+        let mut text = String::new();
+        let mut columns = Vec::new();
+        for col in 0..self.size.cols {
+            let grid_ref = self.terminal.grid_ref(Point::Screen(PointCoordinate {
+                x: col,
+                y: u32::try_from(row).unwrap_or(u32::MAX),
+            }))?;
+            let value = grid_ref_text(&grid_ref)?;
+            columns.push((text.len(), col));
+            text.push_str(&value);
+        }
+        let Some(start_byte) = text.find(query) else {
+            return Ok(None);
+        };
+        let start = columns
+            .iter()
+            .rev()
+            .find(|(byte, _)| *byte <= start_byte)
+            .map_or(0, |(_, col)| *col);
+        let end_byte = start_byte.saturating_add(query.len().saturating_sub(1));
+        let end = columns
+            .iter()
+            .rev()
+            .find(|(byte, _)| *byte <= end_byte)
+            .map_or(start, |(_, col)| *col);
+        Ok(Some((start, end)))
+    }
+
+    fn reveal_search_match(&mut self, row: usize, visible_rows: u64) -> Result<()> {
+        let scrollbar = self.terminal.scrollbar()?;
+        let visible = usize::try_from(visible_rows).unwrap_or(usize::MAX);
+        let total = usize::try_from(scrollbar.total).unwrap_or(usize::MAX);
+        let max_top = total.saturating_sub(visible);
+        let desired = row.saturating_sub(visible / 2).min(max_top);
+        let current = isize::try_from(scrollbar.offset).unwrap_or(isize::MAX);
+        let desired = isize::try_from(desired).unwrap_or(isize::MAX);
+        self.terminal
+            .scroll_viewport(ScrollViewport::Delta(desired.saturating_sub(current)));
+        Ok(())
+    }
+
+    fn set_screen_selection(&self, row: usize, start_col: u16, end_col: u16) -> Result<()> {
+        let row = u32::try_from(row).unwrap_or(u32::MAX);
+        let start = self.terminal.grid_ref(Point::Screen(PointCoordinate {
+            x: start_col,
+            y: row,
+        }))?;
+        let end = self
+            .terminal
+            .grid_ref(Point::Screen(PointCoordinate { x: end_col, y: row }))?;
+        let selection = Selection::new(start, end, false);
+        self.terminal.set_selection(Some(&selection))?;
+        Ok(())
+    }
+
     fn update_working_directory_from_terminal(&mut self) {
         let Ok(pwd) = self.terminal.pwd() else {
             return;
@@ -191,27 +626,42 @@ struct RuntimePty {
     writer: Box<dyn Write + Send>,
     rx: Receiver<Vec<u8>>,
     child: Box<dyn Child + Send + Sync>,
+    process_group_id: Option<i32>,
+    wakeup: WakeupReceiver,
+    reader_thread: Option<thread::JoinHandle<()>>,
+    reader_done: Receiver<()>,
 }
 
 impl RuntimePty {
-    fn spawn(size: TerminalGridSize) -> Result<Self> {
+    fn spawn(size: TerminalGridSize, cwd: Option<&Path>) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(size.pty_size())?;
         let mut cmd = CommandBuilder::new(default_shell());
-        configure_shell_command(&mut cmd);
+        configure_shell_command(&mut cmd, cwd);
 
         let child = pair.slave.spawn_command(cmd)?;
+        let process_group_id = child.process_id().and_then(|pid| i32::try_from(pid).ok());
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
         let (tx, rx) = mpsc::channel();
+        let (wakeup, wakeup_sender) = crate::wakeup::pipe()?;
+        let (done_tx, reader_done) = mpsc::channel();
 
-        thread::spawn(move || read_pty_loop(&mut reader, tx));
+        let reader_thread = thread::spawn(move || {
+            read_pty_loop(&mut reader, tx, &wakeup_sender);
+            wakeup_sender.notify();
+            let _ = done_tx.send(());
+        });
 
         Ok(Self {
             master: pair.master,
             writer,
             rx,
             child,
+            process_group_id,
+            wakeup,
+            reader_thread: Some(reader_thread),
+            reader_done,
         })
     }
 
@@ -226,8 +676,24 @@ impl RuntimePty {
     }
 
     fn kill(&mut self) -> Result<()> {
-        self.child.kill()?;
+        terminate_pty_process_tree(self.child.as_mut(), self.process_group_id);
+        if self
+            .reader_done
+            .recv_timeout(Duration::from_secs(1))
+            .is_ok()
+            && let Some(reader_thread) = self.reader_thread.take()
+        {
+            let _ = reader_thread.join();
+        }
         Ok(())
+    }
+
+    fn wakeup_fd(&self) -> i32 {
+        self.wakeup.fd()
+    }
+
+    fn clear_wakeup(&self) {
+        self.wakeup.clear();
     }
 
     fn poll_exited(&mut self) -> bool {
@@ -239,7 +705,11 @@ impl RuntimePty {
     }
 }
 
-fn read_pty_loop(reader: &mut Box<dyn Read + Send>, tx: mpsc::Sender<Vec<u8>>) {
+fn read_pty_loop(
+    reader: &mut Box<dyn Read + Send>,
+    tx: mpsc::Sender<Vec<u8>>,
+    wakeup: &WakeupSender,
+) {
     let mut buffer = [0u8; 16 * 1024];
     loop {
         match reader.read(&mut buffer) {
@@ -248,16 +718,52 @@ fn read_pty_loop(reader: &mut Box<dyn Read + Send>, tx: mpsc::Sender<Vec<u8>>) {
                 if tx.send(buffer[..count].to_vec()).is_err() {
                     break;
                 }
+                wakeup.notify();
             }
             Err(_) => break,
         }
     }
 }
 
-fn configure_shell_command(cmd: &mut CommandBuilder) {
+#[cfg(unix)]
+fn terminate_pty_process_tree(child: &mut dyn Child, process_group_id: Option<i32>) {
+    if let Some(process_group) = process_group_id {
+        // SAFETY: portable-pty starts the shell as the leader of this process group.
+        unsafe {
+            libc::kill(-process_group, libc::SIGTERM);
+        }
+    }
+    for _ in 0..20 {
+        if child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    if let Some(process_group) = process_group_id {
+        // SAFETY: portable-pty starts the shell as the leader of this process group.
+        unsafe {
+            libc::kill(-process_group, libc::SIGKILL);
+        }
+    }
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_pty_process_tree(child: &mut dyn Child, _process_group_id: Option<i32>) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn configure_shell_command(cmd: &mut CommandBuilder, cwd: Option<&Path>) {
     cmd.arg("-l");
     cmd.arg("-i");
-    if let Ok(cwd) = env::current_dir() {
+    if let Some(cwd) = cwd
+        .map(Path::to_path_buf)
+        .or_else(|| env::current_dir().ok())
+    {
         cmd.cwd(&cwd);
         cmd.env("PWD", cwd);
     }
@@ -268,6 +774,344 @@ fn configure_shell_command(cmd: &mut CommandBuilder) {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("NVTERM_PROTO", "libghostty-vt");
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct NativeKeyInput<'a> {
+    pub key_code: u16,
+    pub modifiers: u32,
+    pub text: Option<&'a str>,
+    pub unshifted: &'a str,
+    pub repeat: bool,
+    pub released: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NativeMouseInput {
+    pub action: mouse::Action,
+    pub button: Option<mouse::Button>,
+    pub modifiers: u32,
+    pub x: f32,
+    pub y: f32,
+    pub cell_width: u32,
+    pub cell_height: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalPoint {
+    pub row: u32,
+    pub col: u16,
+}
+
+struct TerminalSearchState {
+    query: String,
+    row: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct KittyImagePlacementSnapshot {
+    pub image_id: u32,
+    pub image_number: u32,
+    pub z: i32,
+    pub viewport_col: i32,
+    pub viewport_row: i32,
+    pub x_offset: u32,
+    pub y_offset: u32,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub image_width: u32,
+    pub image_height: u32,
+    pub rgba: Arc<[u8]>,
+}
+
+struct CachedKittyImage {
+    image_number: u32,
+    rgba: Arc<[u8]>,
+}
+
+fn cached_kitty_rgba(
+    cache: &RefCell<HashMap<u32, CachedKittyImage>>,
+    image_id: u32,
+    image_number: u32,
+    image: &graphics::Image<'_>,
+) -> Result<Arc<[u8]>> {
+    if let Some(cached) = cache.borrow().get(&image_id)
+        && cached.image_number == image_number
+    {
+        return Ok(Arc::clone(&cached.rgba));
+    }
+    let rgba: Arc<[u8]> = image_rgba(
+        image.data()?,
+        image.width()?,
+        image.height()?,
+        image.format()?,
+    )?
+    .into();
+    cache.borrow_mut().insert(
+        image_id,
+        CachedKittyImage {
+            image_number,
+            rgba: Arc::clone(&rgba),
+        },
+    );
+    Ok(rgba)
+}
+
+fn configure_kitty_graphics(terminal: &mut Terminal<'static, 'static>) -> Result<()> {
+    graphics::set_png_decoder(Some(Box::new(NativePngDecoder::default())))?;
+    terminal
+        .set_kitty_image_storage_limit(64 * 1024 * 1024)?
+        .set_apc_max_bytes_kitty(Some(16 * 1024 * 1024))?
+        .set_kitty_image_from_file_allowed(false)?
+        .set_kitty_image_from_temp_file_allowed(true)?
+        .set_kitty_image_from_shared_mem_allowed(false)?;
+    Ok(())
+}
+
+#[derive(Default)]
+struct NativePngDecoder {
+    buffer: Vec<u8>,
+}
+
+impl graphics::DecodePng for NativePngDecoder {
+    fn decode_png<'alloc>(
+        &mut self,
+        alloc: &'alloc libghostty_vt::alloc::Allocator<'_>,
+        data: &[u8],
+    ) -> Option<graphics::DecodedImage<'alloc>> {
+        use std::io::Cursor;
+
+        let mut decoder = png::Decoder::new(Cursor::new(data));
+        decoder.set_transformations(png::Transformations::ALPHA | png::Transformations::STRIP_16);
+        let mut reader = decoder.read_info().ok()?;
+        let size = reader.output_buffer_size()?;
+        self.buffer.resize(size, 0);
+        let info = reader.next_frame(&mut self.buffer).ok()?;
+        let mut bytes =
+            libghostty_vt::alloc::Bytes::new_with_alloc(alloc, info.buffer_size()).ok()?;
+        bytes.copy_from_slice(&self.buffer[..info.buffer_size()]);
+        reader.finish().ok()?;
+        Some(graphics::DecodedImage {
+            width: info.width,
+            height: info.height,
+            data: bytes,
+        })
+    }
+}
+
+fn image_rgba(data: &[u8], width: u32, height: u32, format: ImageFormat) -> Result<Vec<u8>> {
+    let pixel_count = usize::try_from(width)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(usize::try_from(height).unwrap_or(usize::MAX));
+    let expected = pixel_count.saturating_mul(4);
+    let mut output = Vec::with_capacity(expected);
+    match format {
+        ImageFormat::Rgba => output.extend_from_slice(data),
+        ImageFormat::Rgb => {
+            for pixel in data.chunks_exact(3).take(pixel_count) {
+                output.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+            }
+        }
+        ImageFormat::GrayAlpha => {
+            for pixel in data.chunks_exact(2).take(pixel_count) {
+                output.extend_from_slice(&[pixel[0], pixel[0], pixel[0], pixel[1]]);
+            }
+        }
+        ImageFormat::Gray => {
+            for value in data.iter().copied().take(pixel_count) {
+                output.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        _ => return Err(anyhow::anyhow!("unsupported Kitty image pixel format")),
+    }
+    if output.len() != expected {
+        return Err(anyhow::anyhow!("invalid Kitty image byte length"));
+    }
+    Ok(output)
+}
+
+fn grid_ref_text(grid_ref: &libghostty_vt::screen::GridRef<'_>) -> Result<String> {
+    let mut buffer = vec!['\0'; 8];
+    let written = match grid_ref.graphemes(&mut buffer) {
+        Ok(written) => written,
+        Err(libghostty_vt::Error::OutOfSpace { required }) => {
+            buffer.resize(required, '\0');
+            grid_ref.graphemes(&mut buffer)?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(buffer[..written].iter().collect())
+}
+
+fn normalize_terminal_url(value: &str) -> Option<String> {
+    let value =
+        value.trim_matches(|value: char| value.is_whitespace() || "\"'()[]{}<>,;".contains(value));
+    if value.starts_with("https://")
+        || value.starts_with("http://")
+        || value.starts_with("file://")
+        || value.starts_with("mailto:")
+    {
+        return Some(value.to_owned());
+    }
+    value
+        .starts_with("www.")
+        .then(|| format!("https://{value}"))
+}
+
+const NATIVE_MOD_SHIFT: u32 = 1 << 0;
+const NATIVE_MOD_CONTROL: u32 = 1 << 1;
+const NATIVE_MOD_OPTION: u32 = 1 << 2;
+const NATIVE_MOD_COMMAND: u32 = 1 << 3;
+const NATIVE_MOD_CAPS_LOCK: u32 = 1 << 4;
+const NATIVE_MOD_NUM_LOCK: u32 = 1 << 5;
+
+fn native_key_mods(modifiers: u32) -> Mods {
+    let mut mods = Mods::empty();
+    for (mask, value) in [
+        (NATIVE_MOD_SHIFT, Mods::SHIFT),
+        (NATIVE_MOD_CONTROL, Mods::CTRL),
+        (NATIVE_MOD_OPTION, Mods::ALT),
+        (NATIVE_MOD_COMMAND, Mods::SUPER),
+        (NATIVE_MOD_CAPS_LOCK, Mods::CAPS_LOCK),
+        (NATIVE_MOD_NUM_LOCK, Mods::NUM_LOCK),
+    ] {
+        if modifiers & mask != 0 {
+            mods.insert(value);
+        }
+    }
+    mods
+}
+
+fn valid_key_text(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|value| !value.is_control() && !(('\u{f700}'..='\u{f8ff}').contains(&value)))
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "macOS virtual-key table is intentionally explicit"
+)]
+fn macos_key(code: u16) -> Option<Key> {
+    Some(match code {
+        0 => Key::A,
+        1 => Key::S,
+        2 => Key::D,
+        3 => Key::F,
+        4 => Key::H,
+        5 => Key::G,
+        6 => Key::Z,
+        7 => Key::X,
+        8 => Key::C,
+        9 => Key::V,
+        11 => Key::B,
+        12 => Key::Q,
+        13 => Key::W,
+        14 => Key::E,
+        15 => Key::R,
+        16 => Key::Y,
+        17 => Key::T,
+        18 => Key::Digit1,
+        19 => Key::Digit2,
+        20 => Key::Digit3,
+        21 => Key::Digit4,
+        22 => Key::Digit6,
+        23 => Key::Digit5,
+        24 => Key::Equal,
+        25 => Key::Digit9,
+        26 => Key::Digit7,
+        27 => Key::Minus,
+        28 => Key::Digit8,
+        29 => Key::Digit0,
+        30 => Key::BracketRight,
+        31 => Key::O,
+        32 => Key::U,
+        33 => Key::BracketLeft,
+        34 => Key::I,
+        35 => Key::P,
+        36 => Key::Enter,
+        37 => Key::L,
+        38 => Key::J,
+        39 => Key::Quote,
+        40 => Key::K,
+        41 => Key::Semicolon,
+        42 => Key::Backslash,
+        43 => Key::Comma,
+        44 => Key::Slash,
+        45 => Key::N,
+        46 => Key::M,
+        47 => Key::Period,
+        48 => Key::Tab,
+        49 => Key::Space,
+        50 => Key::Backquote,
+        51 => Key::Backspace,
+        53 => Key::Escape,
+        55 => Key::MetaLeft,
+        56 => Key::ShiftLeft,
+        57 => Key::CapsLock,
+        58 => Key::AltLeft,
+        59 => Key::ControlLeft,
+        60 => Key::ShiftRight,
+        61 => Key::AltRight,
+        62 => Key::ControlRight,
+        64 => Key::F17,
+        65 => Key::NumpadDecimal,
+        67 => Key::NumpadMultiply,
+        69 => Key::NumpadAdd,
+        71 => Key::NumpadClear,
+        75 => Key::NumpadDivide,
+        76 => Key::NumpadEnter,
+        78 => Key::NumpadSubtract,
+        79 => Key::F18,
+        80 => Key::F19,
+        81 => Key::NumpadEqual,
+        82 => Key::Numpad0,
+        83 => Key::Numpad1,
+        84 => Key::Numpad2,
+        85 => Key::Numpad3,
+        86 => Key::Numpad4,
+        87 => Key::Numpad5,
+        88 => Key::Numpad6,
+        89 => Key::Numpad7,
+        90 => Key::F20,
+        91 => Key::Numpad8,
+        92 => Key::Numpad9,
+        93 => Key::IntlYen,
+        96 => Key::F5,
+        97 => Key::F6,
+        98 => Key::F7,
+        99 => Key::F3,
+        100 => Key::F8,
+        101 => Key::F9,
+        102 => Key::NonConvert,
+        103 => Key::F11,
+        104 => Key::KanaMode,
+        105 => Key::F13,
+        106 => Key::F16,
+        107 => Key::F14,
+        109 => Key::F10,
+        111 => Key::F12,
+        113 => Key::F15,
+        114 => Key::Help,
+        115 => Key::Home,
+        116 => Key::PageUp,
+        117 => Key::Delete,
+        118 => Key::F4,
+        119 => Key::End,
+        120 => Key::F2,
+        121 => Key::PageDown,
+        122 => Key::F1,
+        123 => Key::ArrowLeft,
+        124 => Key::ArrowRight,
+        125 => Key::ArrowDown,
+        126 => Key::ArrowUp,
+        _ => return None,
+    })
 }
 
 fn terminal_pwd_path(pwd: &str) -> Option<PathBuf> {
@@ -372,6 +1216,7 @@ impl TerminalRendererModel {
             background: frame.background,
             cursor_color: frame.cursor_color,
             cursor: frame.cursor.clone(),
+            scrollbar: Some(frame.scrollbar.clone()),
             scroll_hint: None,
             windows: vec![
                 self.window
@@ -674,11 +1519,25 @@ fn collect_cells<'alloc>(
     background: TerminalColor,
 ) -> Result<Vec<TerminalCellSnapshot>> {
     let mut output = Vec::new();
+    let selection = row.selection()?;
     let mut cell_iter = cells.update(row)?;
     while let Some(cell) = cell_iter.next() {
-        output.push(terminal_cell(cell, default_fg, background)?);
+        let mut snapshot = terminal_cell(cell, default_fg, background)?;
+        let col = u16::try_from(output.len()).unwrap_or(u16::MAX);
+        if selection.is_some_and(|selection| col >= selection.start_x && col <= selection.end_x) {
+            snapshot.bg = Some(selection_color(background));
+        }
+        output.push(snapshot);
     }
     Ok(output)
+}
+
+fn selection_color(background: TerminalColor) -> TerminalColor {
+    TerminalColor {
+        r: background.r.saturating_add(42),
+        g: background.g.saturating_add(68),
+        b: background.b.saturating_add(96),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -722,10 +1581,27 @@ pub struct TerminalCellStyle {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    pub underline_style: TerminalUnderlineStyle,
+    pub underline_color: Option<TerminalColor>,
+    pub faint: bool,
+    pub blink: bool,
     pub strikethrough: bool,
+    pub overline: bool,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalUnderlineStyle {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, Hash)]
 pub struct TerminalColor {
     pub r: u8,
     pub g: u8,
@@ -836,6 +1712,13 @@ fn terminal_cell(
         fg = bg.unwrap_or(default_fg);
         bg = Some(inverse_bg);
     }
+    if style.faint {
+        fg = blend_rgb(fg, RgbColor::from(background), 0.55);
+    }
+    let underline_color = match style.underline_color {
+        StyleColor::Rgb(color) => Some(TerminalColor::from_rgb(color)),
+        _ => None,
+    };
 
     Ok(TerminalCellSnapshot {
         text,
@@ -848,9 +1731,49 @@ fn terminal_cell(
             bold: style.bold,
             italic: style.italic,
             underline: style.underline != Underline::None,
+            underline_style: terminal_underline_style(style.underline),
+            underline_color,
+            faint: style.faint,
+            blink: style.blink,
             strikethrough: style.strikethrough,
+            overline: style.overline,
         },
     })
+}
+
+fn terminal_underline_style(underline: Underline) -> TerminalUnderlineStyle {
+    match underline {
+        Underline::None => TerminalUnderlineStyle::None,
+        Underline::Single => TerminalUnderlineStyle::Single,
+        Underline::Double => TerminalUnderlineStyle::Double,
+        Underline::Curly => TerminalUnderlineStyle::Curly,
+        Underline::Dotted => TerminalUnderlineStyle::Dotted,
+        Underline::Dashed => TerminalUnderlineStyle::Dashed,
+        _ => TerminalUnderlineStyle::Single,
+    }
+}
+
+fn blend_rgb(foreground: RgbColor, background: RgbColor, amount: f32) -> RgbColor {
+    let blend = |foreground: u8, background: u8| {
+        (f32::from(foreground) * amount + f32::from(background) * (1.0 - amount))
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    RgbColor {
+        r: blend(foreground.r, background.r),
+        g: blend(foreground.g, background.g),
+        b: blend(foreground.b, background.b),
+    }
+}
+
+impl From<TerminalColor> for RgbColor {
+    fn from(value: TerminalColor) -> Self {
+        Self {
+            r: value.r,
+            g: value.g,
+            b: value.b,
+        }
+    }
 }
 
 fn cursor_style_name(style: CursorVisualStyle) -> &'static str {
@@ -935,6 +1858,161 @@ mod tests {
         assert!(text.starts_with("hello"));
         assert_eq!(frame.cursor.unwrap().x, 5);
         assert_eq!(frame.active_screen, TerminalScreenSnapshot::Primary);
+    }
+
+    #[test]
+    fn renderer_preserves_extended_terminal_styles() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 4,
+            rows: 2,
+            max_scrollback: 0,
+        })
+        .unwrap();
+        terminal.vt_write(b"\x1b[3;9;53;4:3;58:2::12:34:56mX");
+        let frame = TerminalFrameRenderer::new()
+            .unwrap()
+            .collect(&mut terminal)
+            .unwrap();
+        let style = &frame.rows[0][0].style;
+
+        assert!(style.italic);
+        assert!(style.strikethrough);
+        assert!(style.overline);
+        assert_eq!(style.underline_style, TerminalUnderlineStyle::Curly);
+        assert_eq!(
+            style.underline_color,
+            Some(TerminalColor {
+                r: 12,
+                g: 34,
+                b: 56
+            })
+        );
+    }
+
+    #[test]
+    fn libghostty_key_encoder_tracks_application_cursor_mode() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 4,
+            rows: 2,
+            max_scrollback: 0,
+        })
+        .unwrap();
+        let mut encoder = key::Encoder::new().unwrap();
+        let mut event = key::Event::new().unwrap();
+        event
+            .set_action(key::Action::Press)
+            .set_key(Key::ArrowUp)
+            .set_mods(key::Mods::empty())
+            .set_composing(false);
+
+        encoder.set_options_from_terminal(&terminal);
+        let mut normal = Vec::new();
+        encoder.encode_to_vec(&event, &mut normal).unwrap();
+        terminal.vt_write(b"\x1b[?1h");
+        encoder.set_options_from_terminal(&terminal);
+        let mut application = Vec::new();
+        encoder.encode_to_vec(&event, &mut application).unwrap();
+
+        assert_eq!(normal, b"\x1b[A");
+        assert_eq!(application, b"\x1bOA");
+    }
+
+    #[test]
+    fn libghostty_key_encoder_emits_key_release_when_requested() {
+        let mut encoder = key::Encoder::new().unwrap();
+        encoder.set_kitty_flags(key::KittyKeyFlags::ALL);
+        let mut event = key::Event::new().unwrap();
+        event
+            .set_action(key::Action::Release)
+            .set_key(Key::ArrowUp)
+            .set_mods(key::Mods::empty())
+            .set_composing(false);
+        let mut encoded = Vec::new();
+
+        encoder.encode_to_vec(&event, &mut encoded).unwrap();
+
+        assert_eq!(encoded, b"\x1b[1;1:3A");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_shutdown_terminates_the_entire_process_group() {
+        let pty_system = native_pty_system();
+        let pair = pty_system.openpty(grid_size(4, 8).pty_size()).unwrap();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        let process_group = child
+            .process_id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .unwrap();
+
+        terminate_pty_process_tree(child.as_mut(), Some(process_group));
+
+        assert!(child.try_wait().unwrap().is_some());
+        // SAFETY: signal zero only checks whether the process group still exists.
+        assert_eq!(unsafe { libc::kill(-process_group, 0) }, -1);
+    }
+
+    #[test]
+    fn bracketed_paste_wraps_and_sanitizes_payload() {
+        let mut data = b"first\x1b[201~second".to_vec();
+        let mut encoded = vec![0; 64];
+        let written = paste::encode(&mut data, true, &mut encoded).unwrap();
+        let encoded = &encoded[..written];
+
+        assert!(encoded.starts_with(b"\x1b[200~"));
+        assert!(encoded.ends_with(b"\x1b[201~"));
+        assert_eq!(
+            encoded
+                .windows(b"\x1b[201~".len())
+                .filter(|window| *window == b"\x1b[201~")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn kitty_png_is_decoded_and_exposed_as_a_placement() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: 8,
+            rows: 4,
+            max_scrollback: 0,
+        })
+        .unwrap();
+        terminal.resize(8, 4, 8, 16).unwrap();
+        configure_kitty_graphics(&mut terminal).unwrap();
+        terminal.vt_write(
+            b"\x1b_Ga=T,f=100,q=0;\
+              iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA\
+              DUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\
+              \x1b\\",
+        );
+
+        let graphics = terminal.kitty_graphics().unwrap();
+        let mut iterator = PlacementIterator::new().unwrap();
+        let mut placements = iterator.update(&graphics).unwrap();
+        let placement = placements.next().expect("Kitty placement");
+        let image_id = placement.image_id().unwrap();
+        let image = graphics.image(image_id).unwrap();
+        let cache = RefCell::new(HashMap::new());
+        let first = cached_kitty_rgba(&cache, image_id, image.number().unwrap(), &image).unwrap();
+        let second = cached_kitty_rgba(&cache, image_id, image.number().unwrap(), &image).unwrap();
+
+        assert_eq!(image.width().unwrap(), 1);
+        assert_eq!(image.height().unwrap(), 1);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            image_rgba(
+                image.data().unwrap(),
+                image.width().unwrap(),
+                image.height().unwrap(),
+                image.format().unwrap()
+            )
+            .unwrap()
+            .len(),
+            4
+        );
     }
 
     #[test]

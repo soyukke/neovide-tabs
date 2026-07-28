@@ -1,0 +1,54 @@
+name: macOS production gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+
+      - name: Verify Rust
+        run: nix develop --command just verify
+
+      - name: Build native host
+        run: nix develop --command just native-build
+
+      - name: Build application bundle
+        run: nix develop --command just native-release
+
+      - name: Run native smoke
+        run: |
+          nix develop --command just native-smoke
+          nix develop --command just native-package-smoke
+
+      - name: Run lifecycle, resize, and session smokes
+        run: |
+          nix develop --command just native-resize-smoke
+          nix develop --command just native-session-smoke
+          nix develop --command just terminal-exit-closes-tab-smoke
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: Neovide-Tabs-macOS
+          path: |
+            spikes/macos-shell/.build/release/Neovide-Tabs-*-macOS-*.zip
+            spikes/macos-shell/.build/release/latest.json
+          if-no-files-found: error

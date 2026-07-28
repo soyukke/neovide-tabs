@@ -9,6 +9,16 @@ build_dir="spikes/macos-shell/.build"
 output="$build_dir/NativeShellSpike"
 tmp_output="$build_dir/NativeShellSpike.$$"
 lock_dir="$build_dir/native-build.lock"
+minimum_macos="14.0"
+host_arch="$(uname -m)"
+case "$host_arch" in
+  arm64 | x86_64) ;;
+  *)
+    echo "unsupported macOS architecture: $host_arch" >&2
+    exit 64
+    ;;
+esac
+swift_target="$host_arch-apple-macos$minimum_macos"
 
 mkdir -p "$build_dir"
 
@@ -42,11 +52,12 @@ cleanup() {
 acquire_lock
 trap cleanup EXIT INT TERM
 
-cargo build --lib
+MACOSX_DEPLOYMENT_TARGET="$minimum_macos" cargo build --lib
 sdk="$(env -u SDKROOT -u DEVELOPER_DIR /usr/bin/xcrun --sdk macosx --show-sdk-path)"
 env -u SDKROOT -u DEVELOPER_DIR \
   /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc \
   -sdk "$sdk" \
+  -target "$swift_target" \
   spikes/macos-shell/NativeShellSpike.swift \
   target/debug/libneovide_tabs.a \
   -framework AppKit \
