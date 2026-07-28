@@ -25,8 +25,9 @@ version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_
 build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_path/Contents/Info.plist")"
 minimum_macos="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app_path/Contents/Info.plist")"
 architecture="$(/usr/bin/lipo -archs "$app_path/Contents/MacOS/neovide-tabs")"
-if [[ "$architecture" == *" "* ]]; then
-  architecture="universal"
+if [[ "$architecture" != "arm64" ]]; then
+  echo "unsupported release architecture: $architecture (expected arm64)" >&2
+  exit 65
 fi
 archive_name="Neovide-Tabs-${version}-macOS-${architecture}.zip"
 archive="$release_root/$archive_name"
@@ -61,6 +62,11 @@ jq -n \
     notarized: $notarized
   }' >"$manifest"
 
-jq -e '.schemaVersion == 1 and (.sha256 | length == 64)' "$manifest" >/dev/null
+jq -e '
+  .schemaVersion == 1
+    and .architecture == "arm64"
+    and (.sha256 | test("^[0-9a-f]{64}$"))
+    and (.downloadURL | startswith("https://github.com/soyukke/neovide-tabs/releases/download/"))
+' "$manifest" >/dev/null
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$app_path"
 printf '%s\n%s\n' "$archive" "$manifest"

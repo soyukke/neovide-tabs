@@ -53,6 +53,10 @@ native-notarize:
 native-release:
     @./scripts/native-release
 
+# Verify update metadata parsing and semantic-version ordering.
+native-update-test:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-update-test; else just native-build && NVTERM_UPDATE_SELF_TEST=1 spikes/macos-shell/.build/NativeShellSpike; fi
+
 # Build, launch briefly, capture the native shell view, and exit.
 native-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-smoke; else just native-build && ./scripts/native-smoke; fi
@@ -305,7 +309,7 @@ secrets:
 
 # Lint release/smoke shell scripts and GitHub Actions workflows.
 ops-lint:
-    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just ops-lint; else shellcheck scripts/native-build scripts/native-package scripts/native-package-smoke scripts/native-notarize scripts/native-release scripts/native-resize-smoke scripts/native-session-smoke scripts/native-smoke scripts/native-soak && actionlint .github/workflows/macos.yml; fi
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just ops-lint; else shellcheck scripts/native-build scripts/native-package scripts/native-package-smoke scripts/native-notarize scripts/native-release scripts/native-resize-smoke scripts/native-session-smoke scripts/native-smoke scripts/native-soak && actionlint .github/workflows/*.yml; fi
 
 # Configure this clone to use the repository-managed Git hooks.
 install-hooks:

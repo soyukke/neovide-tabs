@@ -14,8 +14,9 @@ could not preserve recursive split topology. Failures were also inconsistently
 visible outside a debugger.
 
 Shipping on macOS additionally requires a versioned application bundle,
-hardened-runtime signing, notarization, a reproducible archive, and a stable
-update location.
+hardened-runtime signing, notarization, a reproducible archive, a stable update
+location, and an explicit trust boundary for executable updates. The project
+targets Apple Silicon only.
 
 ## Decision
 
@@ -25,11 +26,25 @@ update location.
   never repository state. The production path signs with a secure timestamp,
   submits to Apple's notary service, staples the ticket, and runs Gatekeeper
   assessment.
-- `just native-release` produces a ZIP archive and schema-versioned SHA-256
-  manifest for the build host architecture. Without Apple credentials it is
-  explicitly a development artifact; with both signing and notary credentials
-  it is a notarized production artifact. The Help menu points to the HTTPS
-  GitHub Releases channel.
+- Native development, packaging, and release scripts reject non-arm64 macOS
+  hosts. `just native-release` produces an arm64 ZIP archive and
+  schema-versioned SHA-256 manifest. Without Apple credentials it is explicitly
+  a development artifact; with both signing and notary credentials it is a
+  notarized production artifact.
+- A `v<package-version>` tag runs the arm64 production gate and package smoke,
+  records GitHub artifact provenance, then publishes the ZIP and manifest as a
+  GitHub Release. GitHub Actions workflow artifacts are not a distribution
+  channel because their identity, redirect URLs, and retention are run-scoped.
+- The packaged application checks the latest GitHub Release after launch and
+  from Help → Check for Updates…. Launch checks notify only for a newer semantic
+  version; manual checks report all outcomes. The download action opens the
+  exact arm64 Release asset.
+- The archive and checksum currently share the GitHub Release trust boundary.
+  Therefore update discovery and download are supported, but unattended
+  replacement or execution is not. A future installer must verify an
+  independently trusted signature, such as Ed25519 with a public key embedded
+  in the application. This publisher signature is independent of Apple
+  Developer ID signing and notarization.
 - PTY and embedded-Neovim readers notify AppKit over nonblocking wakeup file
   descriptors. AppKit schedules rendering for runtime events and active
   animation deadlines only; a permanent display polling timer is not retained.
@@ -60,6 +75,12 @@ such in the manifest and is not a production release. Production publication
 still depends on externally supplied Apple Developer credentials and GitHub
 release permissions; the repository contains the complete deterministic path
 up to those external trust boundaries.
+
+The tag workflow may publish an explicitly labeled, unnotarized arm64 release
+for users who approve it through macOS Privacy & Security. GitHub-generated
+provenance lets users independently verify the build, but the in-app updater
+does not treat provenance or a same-origin checksum as authorization to execute
+new code.
 
 Session restore intentionally starts new shell or Neovim processes. Process
 memory and PTY byte streams are not serialized.
