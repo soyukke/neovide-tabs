@@ -18,8 +18,9 @@ use rmpv::{Value, decode::read_value, encode::write_value};
 
 use crate::{
     neovide_render::NeovideRendererModelSnapshot,
-    neovim_editor::{NeovimEditor, NeovimFrameSnapshot},
+    neovim_editor::NeovimEditor,
     terminal_runtime::TerminalGridSize,
+    wakeup::{WakeupReceiver, WakeupSender},
 };
 
 #[cfg(target_os = "macos")]
@@ -105,6 +106,7 @@ impl NativeNeovimRuntime {
     }
 
     pub fn drain(&mut self) -> Result<bool> {
+        self.process.clear_wakeup();
         let mut changed = false;
         while let Ok(value) = self.rx.try_recv() {
             changed = self.handle_message(value) || changed;
@@ -116,12 +118,12 @@ impl NativeNeovimRuntime {
         Ok(changed)
     }
 
-    pub fn is_exited(&mut self) -> bool {
-        self.refresh_exited()
+    pub fn wakeup_fd(&self) -> i32 {
+        self.process.wakeup_fd()
     }
 
-    pub fn frame(&mut self) -> Result<NeovimFrameSnapshot> {
-        Ok(self.editor.snapshot())
+    pub fn is_exited(&mut self) -> bool {
+        self.refresh_exited()
     }
 
     pub fn renderer_model(&self) -> NeovideRendererModelSnapshot {
@@ -226,6 +228,9 @@ impl NativeNeovimRuntime {
 struct NeovimProcess {
     child: Child,
     stdin: ChildStdin,
+    wakeup: WakeupReceiver,
+    reader_thread: Option<thread::JoinHandle<()>>,
+    reader_done: Receiver<()>,
 }
 
 impl NeovimProcess {
@@ -255,14 +260,37 @@ impl NeovimProcess {
             .take()
             .ok_or_else(|| anyhow!("nvim stdout unavailable"))?;
         let (tx, rx) = mpsc::channel();
-        thread::spawn(move || read_msgpack_loop(stdout, tx));
-        Ok((Self { child, stdin }, rx))
+        let (wakeup, wakeup_sender) = crate::wakeup::pipe()?;
+        let (done_tx, reader_done) = mpsc::channel();
+        let reader_thread = thread::spawn(move || {
+            read_msgpack_loop(stdout, tx, &wakeup_sender);
+            wakeup_sender.notify();
+            let _ = done_tx.send(());
+        });
+        Ok((
+            Self {
+                child,
+                stdin,
+                wakeup,
+                reader_thread: Some(reader_thread),
+                reader_done,
+            },
+            rx,
+        ))
     }
 }
 
 impl Drop for NeovimProcess {
     fn drop(&mut self) {
         terminate_process_tree(&mut self.child);
+        if self
+            .reader_done
+            .recv_timeout(Duration::from_secs(1))
+            .is_ok()
+            && let Some(reader_thread) = self.reader_thread.take()
+        {
+            let _ = reader_thread.join();
+        }
     }
 }
 
@@ -273,6 +301,14 @@ impl NeovimProcess {
             Ok(None) => false,
             Err(_) => true,
         }
+    }
+
+    fn wakeup_fd(&self) -> i32 {
+        self.wakeup.fd()
+    }
+
+    fn clear_wakeup(&self) {
+        self.wakeup.clear();
     }
 }
 
@@ -343,12 +379,17 @@ fn wait_for_child_exit(child: &mut Child) -> bool {
     false
 }
 
-fn read_msgpack_loop(stdout: std::process::ChildStdout, tx: mpsc::Sender<Value>) {
+fn read_msgpack_loop(
+    stdout: std::process::ChildStdout,
+    tx: mpsc::Sender<Value>,
+    wakeup: &WakeupSender,
+) {
     let mut reader = BufReader::new(stdout);
     while let Ok(value) = read_value(&mut reader) {
         if tx.send(value).is_err() {
             break;
         }
+        wakeup.notify();
     }
 }
 

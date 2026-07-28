@@ -1,20 +1,16 @@
 use std::collections::HashMap;
 
-use rmpv::Value;
-use serde::Serialize;
-
 use crate::{
     neovide_render::{
-        NeovideDrawCommand, NeovideFrameCache, NeovideLine, NeovideRenderedWindowCache,
-        NeovideRenderedWindowPlacement, NeovideRenderedWindowSnapshot,
-        NeovideRendererModelSnapshot, NeovideRowUpdate, NeovideScrollHint,
+        NeovideLine, NeovideRenderedWindowCache, NeovideRenderedWindowPlacement,
+        NeovideRenderedWindowSnapshot, NeovideRendererModelSnapshot, NeovideScrollHint,
         NeovideWindowDrawCommand, NeovideWindowKind,
     },
     terminal_runtime::{
-        ScrollbarSnapshot, TerminalCellSnapshot, TerminalCellStyle, TerminalColor,
-        TerminalCursorSnapshot,
+        TerminalCellSnapshot, TerminalCellStyle, TerminalColor, TerminalCursorSnapshot,
     },
 };
+use rmpv::Value;
 
 const DEFAULT_GRID: i64 = 1;
 
@@ -30,9 +26,7 @@ pub struct NeovimEditor {
     current_mode_idx: Option<usize>,
     popupmenu: Option<NeovimPopupmenu>,
     layout_changed: bool,
-    frame_cache: NeovideFrameCache,
     rendered_windows: HashMap<i64, NeovideRenderedWindowCache>,
-    draw_commands: Vec<NeovideDrawCommand>,
     pending_event_scroll_hints: Vec<NeovideScrollHint>,
 }
 
@@ -70,9 +64,7 @@ impl NeovimEditor {
             current_mode_idx: None,
             popupmenu: None,
             layout_changed: true,
-            frame_cache: NeovideFrameCache::default(),
             rendered_windows,
-            draw_commands: Vec::new(),
             pending_event_scroll_hints: Vec::new(),
         }
     }
@@ -110,31 +102,6 @@ impl NeovimEditor {
         }
     }
 
-    pub fn snapshot(&mut self) -> NeovimFrameSnapshot {
-        let rows = self.composed_rows();
-        let full_refresh = self.layout_changed;
-        let scroll_hint = self.take_scroll_hint();
-        let frame_delta = self.frame_cache.update(rows, full_refresh);
-        let visible = self.screen_height() as u64;
-        let commands = std::mem::take(&mut self.draw_commands);
-        NeovimFrameSnapshot {
-            rows: frame_delta.rows,
-            row_updates: frame_delta.row_updates,
-            full_refresh: frame_delta.full_refresh,
-            commands,
-            background: self.default_bg,
-            cursor_color: self.default_fg,
-            cursor: self.cursor_snapshot(),
-            scrollbar: ScrollbarSnapshot {
-                top: 0,
-                visible,
-                total: visible,
-            },
-            semantic_scroll: true,
-            scroll_hint,
-        }
-    }
-
     pub fn renderer_model(&self) -> NeovideRendererModelSnapshot {
         self.renderer_model_with_scroll_hint(None)
     }
@@ -164,6 +131,7 @@ impl NeovimEditor {
             background: self.default_bg,
             cursor_color: self.default_fg,
             cursor: self.cursor_snapshot(),
+            scrollbar: None,
             scroll_hint,
             windows,
         }
@@ -535,62 +503,6 @@ impl NeovimEditor {
         }
     }
 
-    fn composed_rows(&self) -> Vec<Vec<TerminalCellSnapshot>> {
-        let mut rows = self
-            .grids
-            .get(&DEFAULT_GRID)
-            .map(NeovimGrid::snapshot_rows)
-            .unwrap_or_else(|| self.blank_rows());
-        for window in self.sorted_visible_windows() {
-            self.overlay_window(&mut rows, window);
-        }
-        rows
-    }
-
-    fn sorted_visible_windows(&self) -> Vec<&NeovimWindow> {
-        let mut windows = self
-            .windows
-            .values()
-            .filter(|window| window.is_visible_layer())
-            .collect::<Vec<_>>();
-        windows.sort_by_key(|window| window.sort_key());
-        windows
-    }
-
-    fn overlay_window(&self, rows: &mut [Vec<TerminalCellSnapshot>], window: &NeovimWindow) {
-        let Some(grid) = self.grids.get(&window.grid) else {
-            return;
-        };
-        let max_row = window.position.height.min(grid.height as usize);
-        let max_col = window.position.width.min(grid.width as usize);
-        for row in 0..max_row {
-            let target_row = window.position.top + row;
-            if target_row >= rows.len() {
-                continue;
-            }
-            self.overlay_window_row(rows, grid, window, row, max_col);
-        }
-    }
-
-    fn overlay_window_row(
-        &self,
-        rows: &mut [Vec<TerminalCellSnapshot>],
-        grid: &NeovimGrid,
-        window: &NeovimWindow,
-        row: usize,
-        max_col: usize,
-    ) {
-        let target_row = window.position.top + row;
-        let target = &mut rows[target_row];
-        for col in 0..max_col {
-            let target_col = window.position.left + col;
-            if target_col >= target.len() {
-                continue;
-            }
-            target[target_col] = grid.rows[row][col].clone();
-        }
-    }
-
     fn cursor_snapshot(&self) -> Option<TerminalCursorSnapshot> {
         let cursor = self.cursor?;
         let mode = self.cursor_mode_info();
@@ -712,8 +624,6 @@ impl NeovimEditor {
             .entry(grid)
             .or_insert_with(|| NeovideRenderedWindowCache::new(width as usize, height as usize))
             .apply(&command);
-        self.draw_commands
-            .push(NeovideDrawCommand::window(grid, command));
     }
 
     fn rendered_window_placement(&self, grid: i64) -> NeovideRenderedWindowPlacement {
@@ -833,10 +743,6 @@ impl NeovimEditor {
             .or_insert_with(|| NeovimWindow::hidden(grid))
     }
 
-    fn blank_rows(&self) -> Vec<Vec<TerminalCellSnapshot>> {
-        vec![vec![self.default_cell(); self.screen_width()]; self.screen_height()]
-    }
-
     fn default_cell(&self) -> TerminalCellSnapshot {
         default_cell(self.default_fg)
     }
@@ -901,10 +807,6 @@ impl NeovimGrid {
                 self.set(row, col, cell.clone());
             }
         }
-    }
-
-    fn snapshot_rows(&self) -> Vec<Vec<TerminalCellSnapshot>> {
-        self.rows.clone()
     }
 
     fn line(&self, row: usize) -> Option<NeovideLine> {
@@ -1047,10 +949,6 @@ impl NeovimWindow {
         }
     }
 
-    fn sort_key(self) -> (u8, i64, i64) {
-        (self.kind.rank(), self.sort.zindex, self.sort.compindex)
-    }
-
     fn take_scroll_hint(&mut self, screen: ScreenSize) -> Option<NeovideScrollHint> {
         let rows = self.take_pending_scroll_rows()?;
         if !self.is_visible_layer() {
@@ -1106,16 +1004,6 @@ enum WindowKind {
     Normal,
     Float,
     Message,
-}
-
-impl WindowKind {
-    fn rank(self) -> u8 {
-        match self {
-            Self::Normal => 0,
-            Self::Float => 1,
-            Self::Message => 2,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1336,20 +1224,6 @@ struct ResolvedHighlight {
     style: TerminalCellStyle,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct NeovimFrameSnapshot {
-    pub rows: Vec<Vec<TerminalCellSnapshot>>,
-    pub row_updates: Vec<NeovideRowUpdate>,
-    pub full_refresh: bool,
-    pub commands: Vec<NeovideDrawCommand>,
-    pub background: TerminalColor,
-    pub cursor_color: TerminalColor,
-    pub cursor: Option<TerminalCursorSnapshot>,
-    pub scrollbar: ScrollbarSnapshot,
-    pub semantic_scroll: bool,
-    pub scroll_hint: Option<NeovideScrollHint>,
-}
-
 fn grid_id(args: &[Value]) -> Option<i64> {
     args.first()?.as_i64()
 }
@@ -1539,104 +1413,6 @@ mod tests {
     }
 
     #[test]
-    fn composes_positioned_window_over_default_grid() {
-        let mut editor = NeovimEditor::new(6, 3);
-        editor.grid_mut(2).resize(3, 1, blank());
-        set_row(editor.grids.get_mut(&2).unwrap(), 0, "abc");
-        editor.show_window(
-            2,
-            WindowPosition {
-                top: 1,
-                left: 2,
-                width: 3,
-                height: 1,
-            },
-            WindowKind::Normal,
-            WindowSort::default(),
-        );
-
-        let snapshot = editor.snapshot();
-
-        assert_eq!(row_text(&snapshot.rows[1]), "  abc ");
-    }
-
-    #[test]
-    fn repeated_snapshot_returns_only_dirty_rows() {
-        let mut editor = NeovimEditor::new(3, 2);
-        let first = editor.snapshot();
-        assert!(first.full_refresh);
-
-        set_row(editor.grids.get_mut(&DEFAULT_GRID).unwrap(), 1, "xyz");
-        let second = editor.snapshot();
-
-        assert!(!second.full_refresh);
-        assert!(second.rows.is_empty());
-        assert_eq!(second.row_updates.len(), 1);
-        assert_eq!(second.row_updates[0].row, 1);
-        assert_eq!(row_text(&second.row_updates[0].cells), "xyz");
-    }
-
-    #[test]
-    fn grid_line_emits_neovide_draw_line_command() {
-        let mut editor = NeovimEditor::new(3, 2);
-        editor.snapshot();
-
-        editor.handle_event(
-            "grid_line",
-            &Value::Array(vec![
-                DEFAULT_GRID.into(),
-                1.into(),
-                0.into(),
-                Value::Array(vec![Value::Array(vec!["x".into(), 0.into(), 3.into()])]),
-            ]),
-        );
-
-        let snapshot = editor.snapshot();
-
-        assert_eq!(snapshot.commands.len(), 1);
-        let NeovideWindowDrawCommand::DrawLine { row, line } = &snapshot.commands[0].command else {
-            panic!("expected draw line command");
-        };
-        assert_eq!(*row, 1);
-        assert_eq!(line.text, "xxx");
-    }
-
-    #[test]
-    fn grid_scroll_emits_neovide_scroll_command_and_hint() {
-        let mut editor = NeovimEditor::new(3, 3);
-        editor.layout_changed = false;
-        editor.snapshot();
-
-        editor.handle_event(
-            "grid_scroll",
-            &Value::Array(vec![
-                DEFAULT_GRID.into(),
-                0.into(),
-                3.into(),
-                0.into(),
-                3.into(),
-                1.into(),
-                0.into(),
-            ]),
-        );
-
-        let snapshot = editor.snapshot();
-
-        assert_eq!(
-            snapshot.commands[0].command,
-            NeovideWindowDrawCommand::Scroll {
-                top: 0,
-                bottom: 3,
-                left: 0,
-                right: 3,
-                rows: 1,
-                cols: 0,
-            }
-        );
-        assert_eq!(snapshot.scroll_hint.unwrap().rows, 1);
-    }
-
-    #[test]
     fn multiple_grid_scroll_hints_fall_back_to_viewport_hint() {
         let mut editor = NeovimEditor::new(10, 6);
         editor.grid_mut(2).resize(10, 6, blank());
@@ -1670,7 +1446,10 @@ mod tests {
         ];
         editor.window_mut(2).pending_scroll_rows = 18;
 
-        let hint = editor.snapshot().scroll_hint.unwrap();
+        let hint = editor
+            .renderer_model_with_pending_scroll()
+            .scroll_hint
+            .unwrap();
 
         assert_eq!(hint.rows, 5);
     }
@@ -1699,7 +1478,10 @@ mod tests {
         editor.layout_changed = false;
         editor.window_mut(2).pending_scroll_rows = 2;
 
-        let hint = editor.snapshot().scroll_hint.unwrap();
+        let hint = editor
+            .renderer_model_with_pending_scroll()
+            .scroll_hint
+            .unwrap();
 
         assert_eq!(hint.start_row, 2);
         assert_eq!(hint.end_row, 3);
@@ -1739,7 +1521,10 @@ mod tests {
             ]),
         );
 
-        let hint = editor.snapshot().scroll_hint.unwrap();
+        let hint = editor
+            .renderer_model_with_pending_scroll()
+            .scroll_hint
+            .unwrap();
 
         assert_eq!(hint.rows, 5);
     }
@@ -1792,7 +1577,12 @@ mod tests {
         );
         editor.window_mut(2).pending_scroll_rows = 1;
 
-        assert!(editor.snapshot().scroll_hint.is_none());
+        assert!(
+            editor
+                .renderer_model_with_pending_scroll()
+                .scroll_hint
+                .is_none()
+        );
     }
 
     #[test]
@@ -1895,6 +1685,7 @@ mod tests {
                     italic: true,
                     underline: true,
                     strikethrough: true,
+                    ..TerminalCellStyle::default()
                 },
                 ..NeovimHighlight::default()
             },

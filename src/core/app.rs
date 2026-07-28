@@ -1,13 +1,8 @@
-use std::path::PathBuf;
+use serde::Serialize;
 
-use serde::{Deserialize, Serialize};
+use super::layout::{PaneId, PaneLayout, PaneLayoutSnapshot, SplitAxis};
 
-use super::{
-    layout::{PaneId, PaneLayout, SplitAxis},
-    session::{SessionPaneState, SessionState, SessionTabState},
-};
-
-pub const DEFAULT_THEME_NAME: &str = "Graphite";
+const DEFAULT_THEME_NAME: &str = "Graphite";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TerminalCore {
@@ -35,23 +30,6 @@ impl TerminalCore {
         Self::default()
     }
 
-    pub fn from_session(session: &SessionState) -> Self {
-        let mut core = Self::empty();
-        for tab in &session.tabs {
-            if let Some(tab) = TerminalCoreTab::from_session(tab) {
-                core.tabs.push(tab);
-            }
-        }
-
-        if core.tabs.is_empty() {
-            core.new_tab();
-        } else {
-            core.active_tab = session.active_tab.min(core.tabs.len() - 1);
-            core.recalculate_next_ids();
-        }
-        core
-    }
-
     pub fn new_tab(&mut self) -> usize {
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
@@ -60,16 +38,14 @@ impl TerminalCore {
             .active_tab()
             .map(|tab| tab.theme.clone())
             .unwrap_or_else(|| DEFAULT_THEME_NAME.to_owned());
-        let tab = TerminalCoreTab::new(tab_id, pane_id, theme);
-        self.tabs.push(tab);
+        self.tabs.push(TerminalCoreTab::new(tab_id, pane_id, theme));
         self.active_tab = self.tabs.len() - 1;
         self.active_tab
     }
 
     pub fn split_active(&mut self, axis: SplitAxis) -> Option<usize> {
         let pane_id = self.alloc_pane_id();
-        let tab = self.active_tab_mut()?;
-        tab.split_active(pane_id, axis);
+        self.active_tab_mut()?.split_active(pane_id, axis);
         Some(pane_id.0)
     }
 
@@ -91,6 +67,18 @@ impl TerminalCore {
             return false;
         }
         self.active_tab = index;
+        true
+    }
+
+    pub fn select_pane(&mut self, pane_id: usize) -> bool {
+        let pane_id = PaneId(pane_id);
+        let Some(tab) = self.active_tab_mut() else {
+            return false;
+        };
+        if !tab.contains_pane(pane_id) {
+            return false;
+        }
+        tab.active_pane = pane_id;
         true
     }
 
@@ -126,22 +114,6 @@ impl TerminalCore {
         }
     }
 
-    pub fn to_session(&self) -> SessionState {
-        SessionState {
-            active_tab: self.active_tab.min(self.tabs.len().saturating_sub(1)),
-            tabs: self.tabs.iter().map(TerminalCoreTab::to_session).collect(),
-        }
-    }
-
-    fn empty() -> Self {
-        Self {
-            tabs: Vec::new(),
-            active_tab: 0,
-            next_tab_id: 1,
-            next_pane_id: 1,
-        }
-    }
-
     fn active_tab(&self) -> Option<&TerminalCoreTab> {
         self.tabs.get(self.active_tab)
     }
@@ -154,23 +126,6 @@ impl TerminalCore {
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
         id
-    }
-
-    fn recalculate_next_ids(&mut self) {
-        self.next_tab_id = self
-            .tabs
-            .iter()
-            .filter_map(|tab| tab.title.strip_prefix("session ")?.parse::<usize>().ok())
-            .max()
-            .unwrap_or(self.tabs.len())
-            + 1;
-        self.next_pane_id = self
-            .tabs
-            .iter()
-            .flat_map(|tab| tab.panes.iter().map(|pane| pane.id.0))
-            .max()
-            .unwrap_or(0)
-            + 1;
     }
 
     fn select_neighbor_after_tab_close(&mut self, closed_index: usize) {
@@ -189,7 +144,7 @@ struct TerminalCoreTab {
     title: String,
     active_pane: PaneId,
     theme: String,
-    panes: Vec<TerminalCorePane>,
+    panes: Vec<PaneId>,
     layout: PaneLayout,
 }
 
@@ -199,36 +154,14 @@ impl TerminalCoreTab {
             title: format!("session {tab_id}"),
             active_pane: pane_id,
             theme,
-            panes: vec![TerminalCorePane {
-                id: pane_id,
-                cwd: None,
-            }],
+            panes: vec![pane_id],
             layout: PaneLayout::Leaf(pane_id),
         }
     }
 
-    fn from_session(state: &SessionTabState) -> Option<Self> {
-        let panes = session_panes(state);
-        let first_pane = panes.first()?.id;
-        let pane_ids = panes.iter().map(|pane| pane.id).collect::<Vec<_>>();
-        let layout = valid_layout_or_leaf(state.layout.to_runtime(), &pane_ids, first_pane);
-        let active_pane = valid_active_pane(PaneId(state.active_pane), &pane_ids, &layout);
-
-        Some(Self {
-            title: state.title.clone(),
-            active_pane,
-            theme: normalized_theme(&state.theme),
-            panes,
-            layout,
-        })
-    }
-
     fn split_active(&mut self, pane_id: PaneId, axis: SplitAxis) {
         if self.layout.split_leaf(self.active_pane, pane_id, axis) {
-            self.panes.push(TerminalCorePane {
-                id: pane_id,
-                cwd: None,
-            });
+            self.panes.push(pane_id);
             self.active_pane = pane_id;
         }
     }
@@ -241,15 +174,15 @@ impl TerminalCoreTab {
             return false;
         };
         self.layout = layout;
-        self.panes.retain(|pane| pane.id != pane_id);
+        self.panes.retain(|id| *id != pane_id);
         if self.active_pane == pane_id {
-            self.active_pane = self.layout.first_leaf().unwrap_or(self.panes[0].id);
+            self.active_pane = self.layout.first_leaf().unwrap_or(self.panes[0]);
         }
         true
     }
 
     fn contains_pane(&self, pane_id: PaneId) -> bool {
-        self.panes.iter().any(|pane| pane.id == pane_id)
+        self.panes.contains(&pane_id)
     }
 
     fn pane_count(&self) -> usize {
@@ -262,117 +195,31 @@ impl TerminalCoreTab {
             title: self.title.clone(),
             active_pane: self.active_pane.0,
             theme: self.theme.clone(),
-            panes: self.panes.iter().map(TerminalCorePane::snapshot).collect(),
-            layout: self.layout.to_stored(),
-        }
-    }
-
-    fn to_session(&self) -> SessionTabState {
-        SessionTabState {
-            title: self.title.clone(),
-            active_pane: self.active_pane.0,
-            theme: self.theme.clone(),
-            panes: self
-                .panes
-                .iter()
-                .map(TerminalCorePane::to_session)
-                .collect(),
-            layout: self.layout.to_stored(),
+            panes: self.panes.iter().map(|pane| pane.0).collect(),
+            layout: self.layout.snapshot(),
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct TerminalCorePane {
-    id: PaneId,
-    cwd: Option<PathBuf>,
-}
-
-impl TerminalCorePane {
-    fn snapshot(&self) -> TerminalCorePaneSnapshot {
-        TerminalCorePaneSnapshot {
-            id: self.id.0,
-            cwd: self.cwd.clone(),
-        }
-    }
-
-    fn to_session(&self) -> SessionPaneState {
-        SessionPaneState {
-            id: self.id.0,
-            cwd: self.cwd.clone(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct TerminalCoreSnapshot {
     pub active_tab: usize,
     pub tabs: Vec<TerminalCoreTabSnapshot>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct TerminalCoreTabSnapshot {
     pub index: usize,
     pub title: String,
     pub active_pane: usize,
     pub theme: String,
-    pub panes: Vec<TerminalCorePaneSnapshot>,
-    pub layout: super::session::StoredPaneLayout,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct TerminalCorePaneSnapshot {
-    pub id: usize,
-    pub cwd: Option<PathBuf>,
-}
-
-fn session_panes(state: &SessionTabState) -> Vec<TerminalCorePane> {
-    let mut panes = Vec::new();
-    for pane in &state.panes {
-        let id = PaneId(pane.id);
-        if id.0 == 0
-            || panes
-                .iter()
-                .any(|existing: &TerminalCorePane| existing.id == id)
-        {
-            continue;
-        }
-        panes.push(TerminalCorePane {
-            id,
-            cwd: pane.cwd.clone(),
-        });
-    }
-    panes
-}
-
-fn valid_layout_or_leaf(layout: PaneLayout, pane_ids: &[PaneId], fallback: PaneId) -> PaneLayout {
-    if layout.contains_only(pane_ids) {
-        layout
-    } else {
-        PaneLayout::Leaf(fallback)
-    }
-}
-
-fn valid_active_pane(active_pane: PaneId, pane_ids: &[PaneId], layout: &PaneLayout) -> PaneId {
-    if pane_ids.contains(&active_pane) {
-        active_pane
-    } else {
-        layout.first_leaf().unwrap_or(pane_ids[0])
-    }
-}
-
-fn normalized_theme(theme: &str) -> String {
-    if theme.trim().is_empty() {
-        DEFAULT_THEME_NAME.to_owned()
-    } else {
-        theme.to_owned()
-    }
+    pub panes: Vec<usize>,
+    pub layout: PaneLayoutSnapshot,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{StoredPaneLayout, StoredSplitAxis};
 
     #[test]
     fn default_core_starts_with_one_session_tab() {
@@ -380,38 +227,45 @@ mod tests {
 
         assert_eq!(snapshot.active_tab, 0);
         assert_eq!(snapshot.tabs[0].title, "session 1");
-        assert_eq!(snapshot.tabs[0].panes[0].id, 1);
+        assert_eq!(snapshot.tabs[0].active_pane, 1);
     }
 
     #[test]
-    fn splitting_active_pane_updates_layout_and_active_pane() {
+    fn splitting_active_pane_selects_the_new_pane() {
         let mut core = TerminalCore::new();
 
         assert_eq!(core.split_active(SplitAxis::Vertical), Some(2));
         let snapshot = core.snapshot();
-
         assert_eq!(snapshot.tabs[0].active_pane, 2);
-        assert_eq!(snapshot.tabs[0].panes.len(), 2);
-        assert!(matches!(
-            snapshot.tabs[0].layout,
-            StoredPaneLayout::Split {
-                axis: StoredSplitAxis::Vertical,
-                ..
-            }
-        ));
+        assert_eq!(
+            serde_json::to_value(&snapshot.tabs[0].layout).unwrap(),
+            serde_json::json!({
+                "kind": "split",
+                "axis": "vertical",
+                "first": {"kind": "leaf", "pane_id": 1},
+                "second": {"kind": "leaf", "pane_id": 2}
+            })
+        );
     }
 
     #[test]
-    fn closing_split_pane_collapses_layout_and_selects_remaining_pane() {
+    fn selecting_a_visible_split_pane_updates_focus() {
+        let mut core = TerminalCore::new();
+        assert_eq!(core.split_active(SplitAxis::Horizontal), Some(2));
+
+        assert!(core.select_pane(1));
+        assert_eq!(core.snapshot().tabs[0].active_pane, 1);
+        assert!(!core.select_pane(99));
+        assert_eq!(core.snapshot().tabs[0].active_pane, 1);
+    }
+
+    #[test]
+    fn closing_split_pane_selects_the_remaining_pane() {
         let mut core = TerminalCore::new();
         assert_eq!(core.split_active(SplitAxis::Vertical), Some(2));
 
         assert!(core.close_pane(2));
-        let snapshot = core.snapshot();
-
-        assert_eq!(snapshot.tabs[0].panes.len(), 1);
-        assert_eq!(snapshot.tabs[0].active_pane, 1);
-        assert_eq!(snapshot.tabs[0].layout, StoredPaneLayout::Leaf { pane: 1 });
+        assert_eq!(core.snapshot().tabs[0].active_pane, 1);
     }
 
     #[test]
@@ -424,16 +278,6 @@ mod tests {
 
         assert_eq!(snapshot.tabs.len(), 1);
         assert_eq!(snapshot.active_tab, 0);
-        assert_eq!(snapshot.tabs[0].panes[0].id, 1);
-    }
-
-    #[test]
-    fn session_restore_preserves_next_ids() {
-        let session = TerminalCore::new().to_session();
-        let mut core = TerminalCore::from_session(&session);
-
-        let tab_index = core.new_tab();
-        assert_eq!(tab_index, 1);
-        assert_eq!(core.snapshot().tabs[1].title, "session 2");
+        assert_eq!(snapshot.tabs[0].active_pane, 1);
     }
 }

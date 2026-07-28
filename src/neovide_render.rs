@@ -13,106 +13,6 @@ pub const SCROLL_ANIMATION_LENGTH_SECONDS: f32 = 0.3;
 // https://github.com/neovide/neovide
 // Copyright (c) Neovide Contributors.
 
-#[derive(Default)]
-pub struct NeovideFrameCache {
-    rows: Option<Vec<Vec<TerminalCellSnapshot>>>,
-}
-
-impl NeovideFrameCache {
-    pub fn update(
-        &mut self,
-        rows: Vec<Vec<TerminalCellSnapshot>>,
-        force_full: bool,
-    ) -> NeovideFrameDelta {
-        let full_refresh = force_full || self.needs_full_refresh(&rows);
-        if full_refresh {
-            self.rows = Some(rows.clone());
-            return NeovideFrameDelta::full(rows);
-        }
-
-        let updates = self.row_updates(&rows);
-        self.rows = Some(rows);
-        NeovideFrameDelta::incremental(updates)
-    }
-
-    fn needs_full_refresh(&self, rows: &[Vec<TerminalCellSnapshot>]) -> bool {
-        let Some(previous) = &self.rows else {
-            return true;
-        };
-        if previous.len() != rows.len() {
-            return true;
-        }
-        previous
-            .iter()
-            .zip(rows)
-            .any(|(previous, current)| previous.len() != current.len())
-    }
-
-    fn row_updates(&self, rows: &[Vec<TerminalCellSnapshot>]) -> Vec<NeovideRowUpdate> {
-        let Some(previous) = &self.rows else {
-            return rows
-                .iter()
-                .cloned()
-                .enumerate()
-                .map(|(row, cells)| NeovideRowUpdate { row, cells })
-                .collect();
-        };
-        previous
-            .iter()
-            .zip(rows)
-            .enumerate()
-            .filter(|(_, (previous, current))| previous != current)
-            .map(|(row, (_, cells))| NeovideRowUpdate {
-                row,
-                cells: cells.clone(),
-            })
-            .collect()
-    }
-}
-
-pub struct NeovideFrameDelta {
-    pub rows: Vec<Vec<TerminalCellSnapshot>>,
-    pub row_updates: Vec<NeovideRowUpdate>,
-    pub full_refresh: bool,
-}
-
-impl NeovideFrameDelta {
-    fn full(rows: Vec<Vec<TerminalCellSnapshot>>) -> Self {
-        Self {
-            rows,
-            row_updates: Vec::new(),
-            full_refresh: true,
-        }
-    }
-
-    fn incremental(row_updates: Vec<NeovideRowUpdate>) -> Self {
-        Self {
-            rows: Vec::new(),
-            row_updates,
-            full_refresh: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct NeovideRowUpdate {
-    pub row: usize,
-    pub cells: Vec<TerminalCellSnapshot>,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct NeovideDrawCommand {
-    pub grid_id: i64,
-    #[serde(flatten)]
-    pub command: NeovideWindowDrawCommand,
-}
-
-impl NeovideDrawCommand {
-    pub fn window(grid_id: i64, command: NeovideWindowDrawCommand) -> Self {
-        Self { grid_id, command }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NeovideWindowDrawCommand {
@@ -503,6 +403,7 @@ pub struct NeovideRendererModelSnapshot {
     pub background: TerminalColor,
     pub cursor_color: TerminalColor,
     pub cursor: Option<TerminalCursorSnapshot>,
+    pub scrollbar: Option<crate::terminal_runtime::ScrollbarSnapshot>,
     pub scroll_hint: Option<NeovideScrollHint>,
     pub windows: Vec<NeovideRenderedWindowSnapshot>,
 }
@@ -589,41 +490,6 @@ impl NeovideRenderedWindowPlacement {
 mod tests {
     use super::*;
     use crate::terminal_runtime::{TerminalCellStyle, TerminalColor};
-
-    #[test]
-    fn first_update_is_full_refresh() {
-        let mut cache = NeovideFrameCache::default();
-
-        let delta = cache.update(vec![row("abc")], false);
-
-        assert!(delta.full_refresh);
-        assert_eq!(delta.rows.len(), 1);
-        assert!(delta.row_updates.is_empty());
-    }
-
-    #[test]
-    fn unchanged_size_emits_only_dirty_rows() {
-        let mut cache = NeovideFrameCache::default();
-        cache.update(vec![row("abc"), row("def")], false);
-
-        let delta = cache.update(vec![row("abc"), row("xyz")], false);
-
-        assert!(!delta.full_refresh);
-        assert!(delta.rows.is_empty());
-        assert_eq!(delta.row_updates.len(), 1);
-        assert_eq!(delta.row_updates[0].row, 1);
-    }
-
-    #[test]
-    fn size_change_forces_full_refresh() {
-        let mut cache = NeovideFrameCache::default();
-        cache.update(vec![row("abc")], false);
-
-        let delta = cache.update(vec![row("abc"), row("def")], false);
-
-        assert!(delta.full_refresh);
-        assert_eq!(delta.rows.len(), 2);
-    }
 
     #[test]
     fn rendered_window_keeps_line_cache_and_scrolls_like_neovide() {

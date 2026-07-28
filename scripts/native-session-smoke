@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+app="spikes/macos-shell/.build/NativeShellSpike"
+result_file="spikes/macos-shell/.build/native-session-schema.result"
+log_file="/tmp/neovide-tabs-session-schema.log"
+
+rm -f -- "$result_file" "$log_file"
+NVTERM_NATIVE_SMOKE_SCENARIO=session-schema \
+  NVTERM_NATIVE_SMOKE_RESULT="$result_file" \
+  "$app" >"$log_file" 2>&1
+
+if [[ ! -s "$result_file" ]]; then
+  echo "session schema smoke failed before result was written" >&2
+  sed -n '1,160p' "$log_file" >&2 || true
+  exit 1
+fi
+
+result="$(cat "$result_file")"
+printf '%s\n' "$result"
+[[ "$result" == ok\ session-schema* ]]

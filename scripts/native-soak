@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+  exec nix develop --command ./scripts/native-soak "$@"
+fi
+
+iterations="${1:-3}"
+if [[ ! "$iterations" =~ ^[0-9]+$ ]] || ((iterations < 1 || iterations > 20)); then
+  echo "iterations must be an integer from 1 through 20" >&2
+  exit 64
+fi
+
+just native-build
+for iteration in $(seq 1 "$iterations"); do
+  printf 'native soak iteration %s/%s\n' "$iteration" "$iterations"
+  ./scripts/native-smoke
+  ./scripts/native-resize-smoke
+  ./scripts/native-session-smoke
+  ./scripts/native-terminal-bottom-input-smoke
+  ./scripts/native-terminal-exit-closes-tab-smoke
+  ./scripts/native-terminal-nvim-handoff-smoke
+  ./scripts/native-terminal-nvim-cwd-smoke
+  ./scripts/native-terminal-nvim-quit-smoke
+done

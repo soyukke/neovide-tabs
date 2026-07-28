@@ -18,9 +18,11 @@ launch PTY-backed panes through `libghostty-vt`.
 
 `just terminal` launches the native AppKit host.
 
-The Rust crate remains responsible for terminal/runtime state, session metadata,
-notifications, and future protocol parsing. Swift/AppKit remains responsible for
-native windows, menus, tabs, context menus, and the host-side drawing surface.
+The Rust crate remains responsible for terminal/runtime state, pane metadata,
+Neovim compositor state, and future protocol parsing. Swift/AppKit remains
+responsible for native windows, menus, tabs, context menus, and the host-side
+drawing surface. Session restore and notifications are future work rather than
+dormant implementations.
 
 The macroquad frontend is removed from the active dependency graph and should
 not be reintroduced as a product launch path.
@@ -30,8 +32,8 @@ not be reintroduced as a product launch path.
 Native macOS UI behavior can be improved directly instead of being bridged into
 a prototype windowing layer.
 
-Rendering work moves toward the AppKit/Metal host. Short-term terminal text may
-still be drawn by AppKit while the Metal cell renderer is built.
+Rendering runs through the Rust Skia/Metal path hosted by AppKit. AppKit does
+not keep a parallel terminal-cell renderer.
 
 Any missing behavior from the retired frontend must be ported into the Rust
 runtime or native host with tests, not kept alive as a parallel application.

@@ -25,9 +25,11 @@
         {
           default = pkgs.mkShell {
             packages = [
+              pkgs.actionlint
               pkgs.clippy
               pkgs.cargo
               pkgs.git
+              pkgs.gitleaks
               pkgs.just
               pkgs.jq
               pkgs.nerd-fonts.caskaydia-cove
@@ -36,6 +38,7 @@
               pkgs.rust-analyzer
               pkgs.rustc
               pkgs.rustfmt
+              pkgs.shellcheck
               pkgs.zig_0_15
             ];
 

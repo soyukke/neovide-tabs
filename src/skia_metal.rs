@@ -4,6 +4,8 @@ pub struct SkiaRenderGeometry {
     pub height: i32,
     pub origin_x: f32,
     pub origin_y: f32,
+    pub content_width: f32,
+    pub content_height: f32,
     pub cell_width: f32,
     pub cell_height: f32,
 }
@@ -16,20 +18,24 @@ mod platform {
         neovide_text::{NeovideTextRenderer, TextGridGeometry},
         neovim_runtime::NativeNeovimRuntime,
         terminal_runtime::{
-            NativeTerminalRuntime, TerminalCellSnapshot, TerminalColor, TerminalCursorSnapshot,
+            KittyImagePlacementSnapshot, NativeTerminalRuntime, TerminalCellSnapshot,
+            TerminalColor, TerminalCursorSnapshot,
         },
     };
     use skia_safe::{
-        Canvas, Color, ColorSpace, ColorType, Paint, PaintStyle, Rect, Surface, SurfaceProps,
-        SurfacePropsFlags,
+        AlphaType, Canvas, Color, ColorSpace, ColorType, Data, Image, ImageInfo, Paint, PaintStyle,
+        Rect, Surface, SurfaceProps, SurfacePropsFlags,
+        canvas::SrcRectConstraint,
         gpu::{
             self, DirectContext, SurfaceOrigin,
             mtl::{BackendContext, TextureInfo},
             surfaces::wrap_backend_render_target,
         },
+        images,
     };
     use std::{
         cmp::Ordering,
+        collections::{HashMap, HashSet},
         ffi::c_void,
         time::{Duration, Instant},
     };
@@ -43,11 +49,9 @@ mod platform {
         context: DirectContext,
         _backend: BackendContext,
         text_renderer: NeovideTextRenderer,
-        cursor_trail: CursorTrailState,
-        cursor_blink: CursorBlinkState,
-        runtime_id: Option<usize>,
-        last_frame_at: Option<Instant>,
-        scroll_animation_active: bool,
+        runtime_states: HashMap<usize, RuntimeRenderState>,
+        kitty_images: HashMap<(usize, u32), CachedKittyImage>,
+        reported_kitty_failures: HashSet<usize>,
     }
 
     impl NativeSkiaMetalRenderer {
@@ -66,11 +70,9 @@ mod platform {
                 context,
                 _backend: backend,
                 text_renderer: NeovideTextRenderer::new(),
-                cursor_trail: CursorTrailState::default(),
-                cursor_blink: CursorBlinkState::default(),
-                runtime_id: None,
-                last_frame_at: None,
-                scroll_animation_active: false,
+                runtime_states: HashMap::new(),
+                kitty_images: HashMap::new(),
+                reported_kitty_failures: HashSet::new(),
             })
         }
 
@@ -83,25 +85,34 @@ mod platform {
             runtime: &mut NativeNeovimRuntime,
             texture: *mut c_void,
             geometry: SkiaRenderGeometry,
+            clear: bool,
         ) -> bool {
             // SAFETY: `texture` is the current drawable texture pointer for this frame.
             let Some(mut surface) = (unsafe { self.surface(texture, geometry) }) else {
                 return false;
             };
-            self.reset_state_if_runtime_changed(runtime as *const NativeNeovimRuntime as usize);
-            let dt = self.animation_dt();
+            let runtime_id = runtime as *const NativeNeovimRuntime as usize;
             let model = runtime.renderer_model();
-            self.cursor_trail.update(model.cursor.as_ref());
-            self.cursor_blink.update(model.cursor.as_ref());
+            let state = self.runtime_states.entry(runtime_id).or_default();
+            let dt = state.animation_dt();
+            state.cursor_trail.update(model.cursor.as_ref());
+            state.cursor_blink.update(model.cursor.as_ref());
+            state.text_blink_active = model_has_blink(&model);
             draw_model(
                 surface.canvas(),
                 &mut self.text_renderer,
-                &self.cursor_trail,
-                self.cursor_blink.should_render(),
+                &state.cursor_trail,
+                state.cursor_blink.should_render(),
                 &model,
                 geometry,
+                ModelRenderOptions {
+                    clear,
+                    kitty_placements: &[],
+                    kitty_images: &mut self.kitty_images,
+                    runtime_id,
+                },
             );
-            self.scroll_animation_active =
+            state.scroll_animation_active =
                 runtime.advance_renderer_animations(dt) || runtime.has_active_renderer_animation();
             self.context.flush_and_submit();
             true
@@ -116,27 +127,58 @@ mod platform {
             runtime: &mut NativeTerminalRuntime,
             texture: *mut c_void,
             geometry: SkiaRenderGeometry,
+            clear: bool,
         ) -> bool {
             // SAFETY: `texture` is the current drawable texture pointer for this frame.
             let Some(mut surface) = (unsafe { self.surface(texture, geometry) }) else {
                 return false;
             };
-            self.reset_state_if_runtime_changed(runtime as *const NativeTerminalRuntime as usize);
-            let dt = self.animation_dt();
+            let runtime_id = runtime as *const NativeTerminalRuntime as usize;
             let Ok(model) = runtime.renderer_model() else {
                 return false;
             };
-            self.cursor_trail.update(model.cursor.as_ref());
-            self.cursor_blink.update(model.cursor.as_ref());
+            let placements = match runtime.kitty_placements() {
+                Ok(placements) => {
+                    self.reported_kitty_failures.remove(&runtime_id);
+                    placements
+                }
+                Err(error) => {
+                    if self.reported_kitty_failures.insert(runtime_id) {
+                        log::warn!(
+                            target: "renderer",
+                            "kitty_snapshot_failed runtime={runtime_id} error={error:#}"
+                        );
+                    }
+                    Vec::new()
+                }
+            };
+            let visible_image_ids = placements
+                .iter()
+                .map(|placement| placement.image_id)
+                .collect::<std::collections::HashSet<_>>();
+            self.kitty_images.retain(|(owner, image_id), _| {
+                *owner != runtime_id || visible_image_ids.contains(image_id)
+            });
+            let state = self.runtime_states.entry(runtime_id).or_default();
+            let dt = state.animation_dt();
+            state.cursor_trail.update(model.cursor.as_ref());
+            state.cursor_blink.update(model.cursor.as_ref());
+            state.text_blink_active = model_has_blink(&model);
             draw_model(
                 surface.canvas(),
                 &mut self.text_renderer,
-                &self.cursor_trail,
-                self.cursor_blink.should_render(),
+                &state.cursor_trail,
+                state.cursor_blink.should_render(),
                 &model,
                 geometry,
+                ModelRenderOptions {
+                    clear,
+                    kitty_placements: &placements,
+                    kitty_images: &mut self.kitty_images,
+                    runtime_id,
+                },
             );
-            self.scroll_animation_active =
+            state.scroll_animation_active =
                 runtime.advance_renderer_animations(dt) || runtime.has_active_renderer_animation();
             self.context.flush_and_submit();
             true
@@ -146,11 +188,18 @@ mod platform {
             self.next_frame_delay_ms().is_some()
         }
 
+        pub fn forget_runtime(&mut self, runtime_id: usize) {
+            self.runtime_states.remove(&runtime_id);
+            self.kitty_images
+                .retain(|(owner, _), _| *owner != runtime_id);
+            self.reported_kitty_failures.remove(&runtime_id);
+        }
+
         pub fn next_frame_delay_ms(&self) -> Option<u64> {
-            if self.cursor_trail.needs_animation_frame() || self.scroll_animation_active {
-                return Some(0);
-            }
-            self.cursor_blink.next_frame_delay_ms()
+            self.runtime_states
+                .values()
+                .filter_map(RuntimeRenderState::next_frame_delay_ms)
+                .min()
         }
 
         unsafe fn surface(
@@ -176,18 +225,18 @@ mod platform {
                 Some(surface_props()).as_ref(),
             )
         }
+    }
 
-        fn reset_state_if_runtime_changed(&mut self, runtime_id: usize) {
-            if self.runtime_id == Some(runtime_id) {
-                return;
-            }
-            self.runtime_id = Some(runtime_id);
-            self.cursor_trail.clear();
-            self.cursor_blink.clear();
-            self.last_frame_at = None;
-            self.scroll_animation_active = false;
-        }
+    #[derive(Default)]
+    struct RuntimeRenderState {
+        cursor_trail: CursorTrailState,
+        cursor_blink: CursorBlinkState,
+        last_frame_at: Option<Instant>,
+        scroll_animation_active: bool,
+        text_blink_active: bool,
+    }
 
+    impl RuntimeRenderState {
         fn animation_dt(&mut self) -> f32 {
             let now = Instant::now();
             let dt = self
@@ -196,6 +245,37 @@ mod platform {
                 .map_or(0.0, |previous| now.duration_since(previous).as_secs_f32());
             dt.min(MAX_ANIMATION_DT)
         }
+
+        fn next_frame_delay_ms(&self) -> Option<u64> {
+            if self.cursor_trail.needs_animation_frame() || self.scroll_animation_active {
+                return Some(0);
+            }
+            let cursor_delay = self.cursor_blink.next_frame_delay_ms();
+            let text_delay = self.text_blink_active.then_some(500);
+            match (cursor_delay, text_delay) {
+                (Some(cursor), Some(text)) => Some(cursor.min(text)),
+                (Some(cursor), None) => Some(cursor),
+                (None, Some(text)) => Some(text),
+                (None, None) => None,
+            }
+        }
+    }
+
+    fn model_has_blink(model: &NeovideRendererModelSnapshot) -> bool {
+        model.windows.iter().any(|window| {
+            window
+                .lines
+                .iter()
+                .flatten()
+                .any(|line| line.cells.iter().any(|cell| cell.style.blink))
+        })
+    }
+
+    struct ModelRenderOptions<'a> {
+        clear: bool,
+        kitty_placements: &'a [KittyImagePlacementSnapshot],
+        kitty_images: &'a mut HashMap<(usize, u32), CachedKittyImage>,
+        runtime_id: usize,
     }
 
     fn draw_model(
@@ -205,15 +285,119 @@ mod platform {
         cursor_visible: bool,
         model: &NeovideRendererModelSnapshot,
         geometry: SkiaRenderGeometry,
+        options: ModelRenderOptions<'_>,
     ) {
         text_renderer.update_geometry(text_grid_geometry(geometry));
-        canvas.clear(color(model.background));
+        if options.clear {
+            canvas.clear(color(model.background));
+        }
+        canvas.save();
+        canvas.clip_rect(content_rect(geometry), None, Some(false));
         fill_content(canvas, model.background, geometry);
+        draw_kitty_images(
+            canvas,
+            options.kitty_placements,
+            &mut *options.kitty_images,
+            options.runtime_id,
+            geometry,
+            |z| z < 0,
+        );
         for window in sorted_windows(&model.windows) {
             draw_window(canvas, text_renderer, window, geometry);
         }
+        draw_kitty_images(
+            canvas,
+            options.kitty_placements,
+            &mut *options.kitty_images,
+            options.runtime_id,
+            geometry,
+            |z| z >= 0,
+        );
         text_renderer.cleanup_font_cache();
         draw_cursor(canvas, cursor_trail, cursor_visible, model, geometry);
+        canvas.restore();
+    }
+
+    fn draw_kitty_images(
+        canvas: &Canvas,
+        placements: &[KittyImagePlacementSnapshot],
+        image_cache: &mut HashMap<(usize, u32), CachedKittyImage>,
+        runtime_id: usize,
+        geometry: SkiaRenderGeometry,
+        layer: impl Fn(i32) -> bool,
+    ) {
+        for placement in placements.iter().filter(|placement| layer(placement.z)) {
+            let Ok(width) = i32::try_from(placement.image_width) else {
+                continue;
+            };
+            let Ok(height) = i32::try_from(placement.image_height) else {
+                continue;
+            };
+            let key = (runtime_id, placement.image_id);
+            if image_cache.get(&key).is_none_or(|cached| {
+                cached.image_number != placement.image_number
+                    || cached.width != placement.image_width
+                    || cached.height != placement.image_height
+            }) {
+                let info = ImageInfo::new(
+                    (width, height),
+                    ColorType::RGBA8888,
+                    AlphaType::Unpremul,
+                    None,
+                );
+                let Some(image) = images::raster_from_data(
+                    &info,
+                    Data::new_copy(placement.rgba.as_ref()),
+                    usize::try_from(placement.image_width)
+                        .unwrap_or(usize::MAX)
+                        .saturating_mul(4),
+                ) else {
+                    continue;
+                };
+                image_cache.insert(
+                    key,
+                    CachedKittyImage {
+                        image_number: placement.image_number,
+                        width: placement.image_width,
+                        height: placement.image_height,
+                        image,
+                    },
+                );
+            }
+            let Some(image) = image_cache.get(&key).map(|cached| &cached.image) else {
+                continue;
+            };
+            let source = Rect::from_xywh(
+                placement.source_x as f32,
+                placement.source_y as f32,
+                placement.source_width as f32,
+                placement.source_height as f32,
+            );
+            let destination = Rect::from_xywh(
+                geometry.origin_x
+                    + placement.viewport_col as f32 * geometry.cell_width
+                    + placement.x_offset as f32,
+                geometry.origin_y
+                    + placement.viewport_row as f32 * geometry.cell_height
+                    + placement.y_offset as f32,
+                placement.pixel_width as f32,
+                placement.pixel_height as f32,
+            );
+            let paint = Paint::default();
+            canvas.draw_image_rect(
+                image,
+                Some((&source, SrcRectConstraint::Strict)),
+                destination,
+                &paint,
+            );
+        }
+    }
+
+    struct CachedKittyImage {
+        image_number: u32,
+        width: u32,
+        height: u32,
+        image: Image,
     }
 
     fn text_grid_geometry(geometry: SkiaRenderGeometry) -> TextGridGeometry {
@@ -226,15 +410,19 @@ mod platform {
     }
 
     fn fill_content(canvas: &Canvas, background: TerminalColor, geometry: SkiaRenderGeometry) {
-        let rect = Rect::from_xywh(
-            geometry.origin_x,
-            geometry.origin_y,
-            geometry.width as f32 - geometry.origin_x * 2.0,
-            geometry.height as f32 - geometry.origin_y,
-        );
+        let rect = content_rect(geometry);
         let mut paint = Paint::default();
         paint.set_color(color(background));
         canvas.draw_rect(rect, &paint);
+    }
+
+    fn content_rect(geometry: SkiaRenderGeometry) -> Rect {
+        Rect::from_xywh(
+            geometry.origin_x,
+            geometry.origin_y,
+            geometry.content_width,
+            geometry.content_height,
+        )
     }
 
     fn sorted_windows(
@@ -818,6 +1006,7 @@ mod platform {
             _runtime: &mut NativeNeovimRuntime,
             _texture: *mut c_void,
             _geometry: SkiaRenderGeometry,
+            _clear: bool,
         ) -> bool {
             false
         }
@@ -827,6 +1016,7 @@ mod platform {
             _runtime: &mut NativeTerminalRuntime,
             _texture: *mut c_void,
             _geometry: SkiaRenderGeometry,
+            _clear: bool,
         ) -> bool {
             false
         }
@@ -834,6 +1024,8 @@ mod platform {
         pub fn needs_animation_frame(&self) -> bool {
             false
         }
+
+        pub fn forget_runtime(&mut self, _runtime_id: usize) {}
 
         pub fn next_frame_delay_ms(&self) -> Option<u64> {
             None

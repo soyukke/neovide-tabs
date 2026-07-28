@@ -2,6 +2,30 @@ import AppKit
 import CoreGraphics
 import Foundation
 import MetalKit
+import OSLog
+
+enum NativeLog {
+    private static let subsystem = Bundle.main.bundleIdentifier ?? "dev.soyukke.neovide-tabs"
+    private static let lifecycle = Logger(subsystem: subsystem, category: "lifecycle")
+    private static let runtime = Logger(subsystem: subsystem, category: "runtime")
+    private static let session = Logger(subsystem: subsystem, category: "session")
+
+    static func started() {
+        lifecycle.info("application_started")
+    }
+
+    static func lifecycleError(_ message: String) {
+        lifecycle.error("\(message, privacy: .public)")
+    }
+
+    static func runtimeError(_ message: String) {
+        runtime.error("\(message, privacy: .public)")
+    }
+
+    static func sessionWarning(_ message: String) {
+        session.warning("\(message, privacy: .public)")
+    }
+}
 
 @_silgen_name("nvterm_core_create")
 func nvterm_core_create() -> UnsafeMutableRawPointer?
@@ -21,6 +45,9 @@ func nvterm_core_close_pane(_ handle: UnsafeMutableRawPointer?, _ paneId: Int) -
 @_silgen_name("nvterm_core_select_tab")
 func nvterm_core_select_tab(_ handle: UnsafeMutableRawPointer?, _ index: Int) -> UInt8
 
+@_silgen_name("nvterm_core_select_pane")
+func nvterm_core_select_pane(_ handle: UnsafeMutableRawPointer?, _ paneId: Int) -> UInt8
+
 @_silgen_name("nvterm_core_rename_tab")
 func nvterm_core_rename_tab(
     _ handle: UnsafeMutableRawPointer?,
@@ -38,15 +65,21 @@ func nvterm_core_set_tab_theme(
 @_silgen_name("nvterm_core_snapshot_json")
 func nvterm_core_snapshot_json(_ handle: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
 
-@_silgen_name("nvterm_renderer_contract_json")
-func nvterm_renderer_contract_json() -> UnsafeMutablePointer<CChar>?
-
 @_silgen_name("nvterm_runtime_create")
 func nvterm_runtime_create(
     _ rows: UInt16,
     _ cols: UInt16,
     _ pixelWidth: UInt16,
     _ pixelHeight: UInt16
+) -> UnsafeMutableRawPointer?
+
+@_silgen_name("nvterm_runtime_create_in_cwd")
+func nvterm_runtime_create_in_cwd(
+    _ rows: UInt16,
+    _ cols: UInt16,
+    _ pixelWidth: UInt16,
+    _ pixelHeight: UInt16,
+    _ cwd: UnsafePointer<CChar>?
 ) -> UnsafeMutableRawPointer?
 
 @_silgen_name("nvterm_runtime_destroy")
@@ -68,17 +101,109 @@ func nvterm_runtime_write(
     _ len: Int
 ) -> UInt8
 
+@_silgen_name("nvterm_runtime_key")
+func nvterm_runtime_key(
+    _ handle: UnsafeMutableRawPointer?,
+    _ keyCode: UInt16,
+    _ modifiers: UInt32,
+    _ text: UnsafePointer<UInt8>?,
+    _ textLength: Int,
+    _ unshifted: UnsafePointer<UInt8>?,
+    _ unshiftedLength: Int,
+    _ repeated: UInt8,
+    _ released: UInt8
+) -> UInt8
+
+@_silgen_name("nvterm_runtime_text")
+func nvterm_runtime_text(
+    _ handle: UnsafeMutableRawPointer?,
+    _ bytes: UnsafePointer<UInt8>?,
+    _ length: Int
+) -> UInt8
+
+@_silgen_name("nvterm_runtime_paste")
+func nvterm_runtime_paste(
+    _ handle: UnsafeMutableRawPointer?,
+    _ bytes: UnsafePointer<UInt8>?,
+    _ length: Int
+) -> UInt8
+
+@_silgen_name("nvterm_runtime_mouse")
+func nvterm_runtime_mouse(
+    _ handle: UnsafeMutableRawPointer?,
+    _ action: UInt32,
+    _ button: Int32,
+    _ modifiers: UInt32,
+    _ x: Float,
+    _ y: Float,
+    _ cellWidth: UInt32,
+    _ cellHeight: UInt32
+) -> UInt8
+
+@_silgen_name("nvterm_runtime_focus")
+func nvterm_runtime_focus(
+    _ handle: UnsafeMutableRawPointer?,
+    _ focused: UInt8
+) -> UInt8
+
+@_silgen_name("nvterm_runtime_select")
+func nvterm_runtime_select(
+    _ handle: UnsafeMutableRawPointer?,
+    _ startRow: UInt32,
+    _ startCol: UInt16,
+    _ endRow: UInt32,
+    _ endCol: UInt16,
+    _ rectangular: UInt8
+) -> UInt8
+
+@_silgen_name("nvterm_runtime_select_all")
+func nvterm_runtime_select_all(_ handle: UnsafeMutableRawPointer?) -> UInt8
+
+@_silgen_name("nvterm_runtime_clear_selection")
+func nvterm_runtime_clear_selection(_ handle: UnsafeMutableRawPointer?) -> UInt8
+
+@_silgen_name("nvterm_runtime_selected_text")
+func nvterm_runtime_selected_text(
+    _ handle: UnsafeMutableRawPointer?
+) -> UnsafeMutablePointer<CChar>?
+
+@_silgen_name("nvterm_runtime_hyperlink")
+func nvterm_runtime_hyperlink(
+    _ handle: UnsafeMutableRawPointer?,
+    _ row: UInt32,
+    _ col: UInt16
+) -> UnsafeMutablePointer<CChar>?
+
+@_silgen_name("nvterm_runtime_title")
+func nvterm_runtime_title(_ handle: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
+
+@_silgen_name("nvterm_runtime_take_bell_count")
+func nvterm_runtime_take_bell_count(_ handle: UnsafeMutableRawPointer?) -> UInt64
+
+@_silgen_name("nvterm_runtime_find")
+func nvterm_runtime_find(
+    _ handle: UnsafeMutableRawPointer?,
+    _ query: UnsafePointer<CChar>?,
+    _ backwards: UInt8
+) -> UInt8
+
+@_silgen_name("nvterm_runtime_set_option_as_alt")
+func nvterm_runtime_set_option_as_alt(
+    _ handle: UnsafeMutableRawPointer?,
+    _ enabled: UInt8
+) -> UInt8
+
 @_silgen_name("nvterm_runtime_drain")
 func nvterm_runtime_drain(_ handle: UnsafeMutableRawPointer?) -> UInt8
 
 @_silgen_name("nvterm_runtime_exited")
 func nvterm_runtime_exited(_ handle: UnsafeMutableRawPointer?) -> UInt8
 
+@_silgen_name("nvterm_runtime_wakeup_fd")
+func nvterm_runtime_wakeup_fd(_ handle: UnsafeMutableRawPointer?) -> Int32
+
 @_silgen_name("nvterm_runtime_scroll")
 func nvterm_runtime_scroll(_ handle: UnsafeMutableRawPointer?, _ requestedRows: Int) -> Int
-
-@_silgen_name("nvterm_runtime_frame_json")
-func nvterm_runtime_frame_json(_ handle: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
 
 @_silgen_name("nvterm_runtime_renderer_scroll_position")
 func nvterm_runtime_renderer_scroll_position(_ handle: UnsafeMutableRawPointer?) -> Float
@@ -145,8 +270,8 @@ func nvterm_nvim_drain(_ handle: UnsafeMutableRawPointer?) -> UInt8
 @_silgen_name("nvterm_nvim_exited")
 func nvterm_nvim_exited(_ handle: UnsafeMutableRawPointer?) -> UInt8
 
-@_silgen_name("nvterm_nvim_frame_json")
-func nvterm_nvim_frame_json(_ handle: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("nvterm_nvim_wakeup_fd")
+func nvterm_nvim_wakeup_fd(_ handle: UnsafeMutableRawPointer?) -> Int32
 
 @_silgen_name("nvterm_nvim_renderer_model_json")
 func nvterm_nvim_renderer_model_json(_ handle: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
@@ -172,8 +297,11 @@ func nvterm_skia_metal_render_nvim(
     _ height: Int32,
     _ originX: Float,
     _ originY: Float,
+    _ contentWidth: Float,
+    _ contentHeight: Float,
     _ cellWidth: Float,
-    _ cellHeight: Float
+    _ cellHeight: Float,
+    _ clear: UInt8
 ) -> UInt8
 
 @_silgen_name("nvterm_skia_metal_render_terminal")
@@ -185,12 +313,21 @@ func nvterm_skia_metal_render_terminal(
     _ height: Int32,
     _ originX: Float,
     _ originY: Float,
+    _ contentWidth: Float,
+    _ contentHeight: Float,
     _ cellWidth: Float,
-    _ cellHeight: Float
+    _ cellHeight: Float,
+    _ clear: UInt8
 ) -> UInt8
 
 @_silgen_name("nvterm_skia_metal_needs_animation_frame")
 func nvterm_skia_metal_needs_animation_frame(_ renderer: UnsafeMutableRawPointer?) -> UInt8
+
+@_silgen_name("nvterm_skia_metal_forget_runtime")
+func nvterm_skia_metal_forget_runtime(
+    _ renderer: UnsafeMutableRawPointer?,
+    _ runtime: UnsafeMutableRawPointer?
+)
 
 @_silgen_name("nvterm_skia_metal_next_frame_delay_ms")
 func nvterm_skia_metal_next_frame_delay_ms(_ renderer: UnsafeMutableRawPointer?) -> UInt64
@@ -198,35 +335,19 @@ func nvterm_skia_metal_next_frame_delay_ms(_ renderer: UnsafeMutableRawPointer?)
 private let ffiSplitVertical: UInt32 = 0
 private let ffiSplitHorizontal: UInt32 = 1
 private let themes = ["Graphite", "Juniper", "Harbor", "Rose", "Paper"]
-private let terminalBackground = NSColor(
-    calibratedRed: 20.0 / 255.0,
-    green: 22.0 / 255.0,
-    blue: 26.0 / 255.0,
-    alpha: 1.0
-)
 private let terminalHorizontalInset: CGFloat = 12
 private let terminalTextTop: CGFloat = 38
 private let terminalTextBottomInset: CGFloat = 10
 private let defaultTerminalFontSize: CGFloat = 15
 private let minTerminalFontSize: CGFloat = 9
 private let maxTerminalFontSize: CGFloat = 32
-private let cursorTrailAlpha: CGFloat = 145.0 / 255.0
 private let maxOutputScrollAnimationRows = 12
-private let maxFullFrameScrollAnimationRows = 24
-private let maxScrollRegionDetectionRows = 80
-private let minFullFrameScrollMatchRows = 4
 private let minTerminalVimScrollSmokePosition = 3.0
 private let maxTerminalBottomInputSmokePosition = 0.1
-private let terminalNvimHandoffDrainInterval: TimeInterval = 0.05
-private let terminalNvimHandoffDrainAttempts = 6
-private let terminalNvimHandoffMinimumDrainAttempts = 2
 private let nvimStartupCommandDelay: TimeInterval = 0.4
 private let nvimStartupCwdCorrectionDelay: TimeInterval = 1.0
-private let minJumpAnimationContentRows = 8
 private let nvimSmokeReadyMarker = "NVSMOKE_READY"
 private let nvimJumpBaselineDelay: TimeInterval = 0.5
-private let minScrollRegionContentRows = 2
-private let outputScrollAnimationFarLines = 1
 private let themeAccentColors: [String: NSColor] = [
     "Graphite": NSColor(calibratedRed: 0.54, green: 0.56, blue: 0.62, alpha: 1.0),
     "Juniper": NSColor(calibratedRed: 0.18, green: 0.62, blue: 0.43, alpha: 1.0),
@@ -234,6 +355,63 @@ private let themeAccentColors: [String: NSColor] = [
     "Rose": NSColor(calibratedRed: 0.78, green: 0.32, blue: 0.48, alpha: 1.0),
     "Paper": NSColor(calibratedRed: 0.78, green: 0.57, blue: 0.26, alpha: 1.0),
 ]
+private let fontSizePreferenceKey = "terminalFontSize"
+private let optionAsAltPreferenceKey = "optionAsAlt"
+private let notificationsPreferenceKey = "bellNotifications"
+private let sessionRestorePreferenceKey = "restoreSession"
+private let sessionStatePreferenceKey = "sessionState"
+private let currentSessionSchemaVersion = 2
+
+struct NativeSessionState: Codable {
+    let schemaVersion: Int
+    let activeTab: Int
+    let tabs: [NativeSessionTab]
+}
+
+struct NativeSessionTab: Codable {
+    let title: String
+    let theme: String
+    let layout: NativeSessionPane
+}
+
+final class NativeSessionPane: Codable {
+    let kind: String
+    let axis: String?
+    let paneMode: String?
+    let cwd: String
+    let active: Bool
+    let first: NativeSessionPane?
+    let second: NativeSessionPane?
+
+    init(
+        kind: String,
+        axis: String? = nil,
+        paneMode: String? = nil,
+        cwd: String = "",
+        active: Bool = false,
+        first: NativeSessionPane? = nil,
+        second: NativeSessionPane? = nil
+    ) {
+        self.kind = kind
+        self.axis = axis
+        self.paneMode = paneMode
+        self.cwd = cwd
+        self.active = active
+        self.first = first
+        self.second = second
+    }
+}
+
+struct LegacyNativeSessionState: Codable {
+    let activeTab: Int
+    let tabs: [LegacyNativeSessionTab]
+}
+
+struct LegacyNativeSessionTab: Codable {
+    let title: String
+    let theme: String
+    let cwd: String
+}
 
 struct TerminalCoreSnapshot: Decodable {
     let active_tab: Int
@@ -245,88 +423,30 @@ struct TerminalCoreTabSnapshot: Decodable {
     let title: String
     let active_pane: Int
     let theme: String
-    let panes: [TerminalCorePaneSnapshot]
+    let panes: [Int]
+    let layout: PaneLayoutSnapshot
 }
 
-struct TerminalCorePaneSnapshot: Decodable {
-    let id: Int
-    let cwd: String?
-}
-
-struct RendererContract: Decodable {
-    let backend: String
-    let surface: RendererSurfaceContract
-    let cursor: CursorAnimationContract
-    let scroll: ScrollAnimationContract
-    let images: ImageProtocolContract
-}
-
-struct RendererSurfaceContract: Decodable {
-    let view: String
-    let pixel_format: String
-    let preferred_frames_per_second: Int
-}
-
-struct CursorAnimationContract: Decodable {
-    let neovide_like_trail: Bool
-    let duration_seconds: Double
-}
-
-struct ScrollAnimationContract: Decodable {
-    let smooth_history_scroll: Bool
-    let output_shift_animation: Bool
-}
-
-struct ImageProtocolContract: Decodable {
-    let kitty_graphics_protocol: Bool
-    let iterm2_inline_images: Bool
-}
-
-struct TerminalFrameSnapshot: Decodable {
-    let rows: [[TerminalCellSnapshot]]
-    let row_updates: [TerminalRowUpdate]?
-    let full_refresh: Bool?
-    let commands: [TerminalDrawCommand]?
-    let background: TerminalColorSnapshot
-    let cursor_color: TerminalColorSnapshot
-    let cursor: TerminalCursorSnapshot?
-    let scrollbar: ScrollbarSnapshot
-    let semantic_scroll: Bool?
-    let scroll_hint: FrameScrollHint?
-
-    func replacingRows(_ rows: [[TerminalCellSnapshot]]) -> TerminalFrameSnapshot {
-        TerminalFrameSnapshot(
-            rows: rows,
-            row_updates: nil,
-            full_refresh: true,
-            commands: commands,
-            background: background,
-            cursor_color: cursor_color,
-            cursor: cursor,
-            scrollbar: scrollbar,
-            semantic_scroll: semantic_scroll,
-            scroll_hint: scroll_hint
-        )
-    }
-}
-
-struct TerminalRowUpdate: Decodable {
-    let row: Int
-    let cells: [TerminalCellSnapshot]
-}
-
-struct TerminalDrawCommand: Decodable {
-    let grid_id: Int
+final class PaneLayoutSnapshot: Decodable {
     let kind: String
+    let pane_id: Int?
+    let axis: String?
+    let first: PaneLayoutSnapshot?
+    let second: PaneLayoutSnapshot?
 }
 
 struct NeovideRendererModelSnapshot: Decodable {
-    let schema_version: Int
     let background: TerminalColorSnapshot
-    let cursor_color: TerminalColorSnapshot
     let cursor: TerminalCursorSnapshot?
+    let scrollbar: ScrollbarSnapshot?
     let scroll_hint: FrameScrollHint?
     let windows: [NeovideRenderedWindowSnapshot]
+}
+
+struct ScrollbarSnapshot: Decodable {
+    let top: UInt64
+    let visible: UInt64
+    let total: UInt64
 }
 
 struct NeovideRenderedWindowSnapshot: Decodable {
@@ -339,7 +459,6 @@ struct NeovideRenderedWindowSnapshot: Decodable {
     let zindex: Int
     let compindex: Int
     let hidden: Bool
-    let scroll_position: Double
     let lines: [NeovideLineSnapshot?]
 }
 
@@ -348,35 +467,19 @@ struct NeovideLineSnapshot: Decodable {
     let cells: [TerminalCellSnapshot]
 }
 
-struct TerminalCellSnapshot: Decodable, Equatable {
+struct TerminalCellSnapshot: Decodable {
     let text: String
-    let fg: TerminalColorSnapshot
     let bg: TerminalColorSnapshot?
     let blend: UInt8
-    let style: TerminalCellStyleSnapshot
 }
 
-struct TerminalCellStyleSnapshot: Decodable, Equatable {
-    let bold: Bool
-    let italic: Bool
-    let underline: Bool
-    let strikethrough: Bool
-
-    static let plain = TerminalCellStyleSnapshot(
-        bold: false,
-        italic: false,
-        underline: false,
-        strikethrough: false
-    )
-}
-
-struct TerminalColorSnapshot: Decodable, Equatable {
+struct TerminalColorSnapshot: Decodable {
     let r: UInt8
     let g: UInt8
     let b: UInt8
 }
 
-struct TerminalCursorSnapshot: Decodable, Equatable {
+struct TerminalCursorSnapshot: Decodable {
     let x: UInt16
     let y: UInt16
     let style: String
@@ -384,12 +487,6 @@ struct TerminalCursorSnapshot: Decodable, Equatable {
     let blinkwait_ms: UInt64
     let blinkon_ms: UInt64
     let blinkoff_ms: UInt64
-}
-
-struct ScrollbarSnapshot: Decodable {
-    let top: UInt64
-    let visible: UInt64
-    let total: UInt64
 }
 
 struct FrameScrollHint: Decodable {
@@ -410,38 +507,6 @@ struct FrameScrollHint: Decodable {
     }
 }
 
-struct RowScrollAnimation {
-    let startRow: Int
-    let endRow: Int
-    let startCol: Int?
-    let endCol: Int?
-    let rows: Int
-    let previousRows: [[TerminalCellSnapshot]]
-    var visualOffsetRows: CGFloat
-    var velocityRows: CGFloat
-
-    func contains(row: Int) -> Bool {
-        row >= startRow && row <= endRow
-    }
-
-    func contains(row: Int, col: Int) -> Bool {
-        guard contains(row: row) else {
-            return false
-        }
-        if let startCol, col < startCol {
-            return false
-        }
-        if let endCol, col > endCol {
-            return false
-        }
-        return true
-    }
-
-    var isColumnBounded: Bool {
-        startCol != nil || endCol != nil
-    }
-}
-
 struct OutputScrollShift {
     let startRow: Int
     let endRow: Int
@@ -458,15 +523,11 @@ struct OutputScrollShift {
     }
 }
 
-struct ScrollShiftCandidate {
-    let shift: OutputScrollShift
-    let score: Int
-    let contentRows: Int
-}
-
 struct SkiaRenderGeometry {
     let originX: Float
     let originY: Float
+    let contentWidth: Float
+    let contentHeight: Float
     let cellWidth: Float
     let cellHeight: Float
 }
@@ -489,16 +550,13 @@ final class RustCore {
         decode(nvterm_core_snapshot_json(handle), as: TerminalCoreSnapshot.self)
     }
 
-    func rendererContract() -> RendererContract? {
-        decode(nvterm_renderer_contract_json(), as: RendererContract.self)
-    }
-
     func newTab() {
         _ = nvterm_core_new_tab(handle)
     }
 
-    func splitActive(axis: UInt32) {
-        _ = nvterm_core_split_active(handle, axis)
+    func splitActive(axis: UInt32) -> Int? {
+        let paneId = nvterm_core_split_active(handle, axis)
+        return paneId >= 0 ? paneId : nil
     }
 
     func closePane(_ paneId: Int) -> Bool {
@@ -507,6 +565,10 @@ final class RustCore {
 
     func selectTab(_ index: Int) -> Bool {
         nvterm_core_select_tab(handle, index) != 0
+    }
+
+    func selectPane(_ paneId: Int) -> Bool {
+        nvterm_core_select_pane(handle, paneId) != 0
     }
 
     func renameTab(_ index: Int, title: String) {
@@ -530,7 +592,12 @@ final class RustCore {
         }
 
         let json = String(cString: pointer)
-        return try? JSONDecoder().decode(T.self, from: Data(json.utf8))
+        do {
+            return try JSONDecoder().decode(T.self, from: Data(json.utf8))
+        } catch {
+            NativeLog.runtimeError("core_snapshot_decode_failed error=\(error)")
+            return nil
+        }
     }
 }
 
@@ -539,15 +606,9 @@ protocol NativePane: AnyObject {
 
     func resize(grid: (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int))
     func write(_ data: Data)
-    func mouse(_ input: NativeMouseInput) -> Bool
-    func runCommand(_ command: String) -> Bool
     func drain() -> Bool
     func isExited() -> Bool
-    func currentWorkingDirectory() -> String?
-    func scroll(rows: Int) -> Int
-    func frame() -> TerminalFrameSnapshot?
-    func rendererModel() -> NeovideRendererModelSnapshot?
-    func rendererScrollPosition() -> Double
+    func wakeupFD() -> Int32
     func renderHandle() -> UnsafeMutableRawPointer?
 }
 
@@ -558,6 +619,10 @@ struct NativeMouseInput {
     let grid: Int64
     let row: Int64
     let col: Int64
+    var surfaceX: Float = 0
+    var surfaceY: Float = 0
+    var cellWidth: UInt32 = 1
+    var cellHeight: UInt32 = 1
 }
 
 enum NativePaneMode {
@@ -567,19 +632,47 @@ enum NativePaneMode {
     static func current() -> Self {
         ProcessInfo.processInfo.environment["NVTERM_NATIVE_PANE"] == "nvim" ? .neovim : .terminal
     }
+
+    init(sessionValue: String?) {
+        self = sessionValue == "neovim" ? .neovim : .terminal
+    }
+
+    var sessionValue: String {
+        switch self {
+        case .terminal:
+            "terminal"
+        case .neovim:
+            "neovim"
+        }
+    }
 }
 
 final class RustTerminalPane: NativePane {
     let kind = NativePaneMode.terminal
     private let handle: UnsafeMutableRawPointer
 
-    init?(grid: (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int)) {
-        guard let handle = nvterm_runtime_create(
+    init?(
+        grid: (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int),
+        cwd: String? = nil
+    ) {
+        let handle = cwd.flatMap { directory in
+            directory.withCString { value in
+                nvterm_runtime_create_in_cwd(
+                    clampedUInt16(grid.rows),
+                    clampedUInt16(grid.cols),
+                    clampedUInt16(grid.widthPixels),
+                    clampedUInt16(grid.heightPixels),
+                    value
+                )
+            }
+        } ?? nvterm_runtime_create(
             clampedUInt16(grid.rows),
             clampedUInt16(grid.cols),
             clampedUInt16(grid.widthPixels),
             clampedUInt16(grid.heightPixels)
-        ) else {
+        )
+        guard let handle else {
+            NativeLog.runtimeError("terminal_runtime_create_failed")
             return nil
         }
         self.handle = handle
@@ -608,12 +701,120 @@ final class RustTerminalPane: NativePane {
         }
     }
 
-    func mouse(_ input: NativeMouseInput) -> Bool {
-        false
+    func key(_ event: NSEvent, released: Bool) -> Bool {
+        let text = terminalKeyText(event)
+        let unshifted = event.charactersIgnoringModifiers ?? ""
+        let textData = text.map { Data($0.utf8) }
+        let unshiftedData = Data(unshifted.utf8)
+        return unshiftedData.withUnsafeBytes { unshiftedBuffer in
+            let unshiftedBase = unshiftedBuffer.bindMemory(to: UInt8.self).baseAddress
+            if let textData {
+                return textData.withUnsafeBytes { textBuffer in
+                    nvterm_runtime_key(
+                        handle,
+                        event.keyCode,
+                        terminalModifierMask(event.modifierFlags),
+                        textBuffer.bindMemory(to: UInt8.self).baseAddress,
+                        textBuffer.count,
+                        unshiftedBase,
+                        unshiftedBuffer.count,
+                        event.isARepeat ? 1 : 0,
+                        released ? 1 : 0
+                    ) != 0
+                }
+            }
+            return nvterm_runtime_key(
+                handle,
+                event.keyCode,
+                terminalModifierMask(event.modifierFlags),
+                nil,
+                0,
+                unshiftedBase,
+                unshiftedBuffer.count,
+                event.isARepeat ? 1 : 0,
+                released ? 1 : 0
+            ) != 0
+        }
     }
 
-    func runCommand(_ command: String) -> Bool {
-        false
+    func writeText(_ text: String) {
+        withUtf8(text) { bytes, count in
+            _ = nvterm_runtime_text(handle, bytes, count)
+        }
+    }
+
+    func paste(_ text: String) {
+        withUtf8(text) { bytes, count in
+            _ = nvterm_runtime_paste(handle, bytes, count)
+        }
+    }
+
+    func mouse(_ input: NativeMouseInput) -> Bool {
+        nvterm_runtime_mouse(
+            handle,
+            terminalMouseAction(input.action),
+            terminalMouseButton(input.button, action: input.action),
+            terminalModifierMask(input.modifier),
+            input.surfaceX,
+            input.surfaceY,
+            input.cellWidth,
+            input.cellHeight
+        ) != 0
+    }
+
+    func focus(_ focused: Bool) {
+        _ = nvterm_runtime_focus(handle, focused ? 1 : 0)
+    }
+
+    func select(start: (row: Int, col: Int), end: (row: Int, col: Int), rectangular: Bool) {
+        _ = nvterm_runtime_select(
+            handle,
+            UInt32(max(0, start.row)),
+            clampedUInt16(start.col + 1) - 1,
+            UInt32(max(0, end.row)),
+            clampedUInt16(end.col + 1) - 1,
+            rectangular ? 1 : 0
+        )
+    }
+
+    func selectAll() {
+        _ = nvterm_runtime_select_all(handle)
+    }
+
+    func clearSelection() {
+        _ = nvterm_runtime_clear_selection(handle)
+    }
+
+    func selectedText() -> String? {
+        ownedRustString(nvterm_runtime_selected_text(handle))
+    }
+
+    func hyperlink(row: Int, col: Int) -> String? {
+        ownedRustString(
+            nvterm_runtime_hyperlink(
+                handle,
+                UInt32(max(0, row)),
+                clampedUInt16(col + 1) - 1
+            )
+        )
+    }
+
+    func title() -> String? {
+        ownedRustString(nvterm_runtime_title(handle))
+    }
+
+    func takeBellCount() -> UInt64 {
+        nvterm_runtime_take_bell_count(handle)
+    }
+
+    func find(_ query: String, backwards: Bool) -> Bool {
+        query.withCString { value in
+            nvterm_runtime_find(handle, value, backwards ? 1 : 0) != 0
+        }
+    }
+
+    func setOptionAsAlt(_ enabled: Bool) {
+        _ = nvterm_runtime_set_option_as_alt(handle, enabled ? 1 : 0)
     }
 
     @discardableResult
@@ -623,6 +824,10 @@ final class RustTerminalPane: NativePane {
 
     func isExited() -> Bool {
         nvterm_runtime_exited(handle) != 0
+    }
+
+    func wakeupFD() -> Int32 {
+        nvterm_runtime_wakeup_fd(handle)
     }
 
     func currentWorkingDirectory() -> String? {
@@ -641,14 +846,6 @@ final class RustTerminalPane: NativePane {
         nvterm_runtime_scroll(handle, rows)
     }
 
-    func frame() -> TerminalFrameSnapshot? {
-        decode(nvterm_runtime_frame_json(handle), as: TerminalFrameSnapshot.self)
-    }
-
-    func rendererModel() -> NeovideRendererModelSnapshot? {
-        nil
-    }
-
     func rendererScrollPosition() -> Double {
         Double(nvterm_runtime_renderer_scroll_position(handle))
     }
@@ -657,17 +854,6 @@ final class RustTerminalPane: NativePane {
         handle
     }
 
-    private func decode<T: Decodable>(_ pointer: UnsafeMutablePointer<CChar>?, as type: T.Type) -> T? {
-        guard let pointer else {
-            return nil
-        }
-        defer {
-            nvterm_string_free(pointer)
-        }
-
-        let json = String(cString: pointer)
-        return try? JSONDecoder().decode(T.self, from: Data(json.utf8))
-    }
 }
 
 final class RustNeovimPane: NativePane {
@@ -692,6 +878,7 @@ final class RustNeovimPane: NativePane {
             clampedUInt16(grid.heightPixels)
         )
         guard let handle = handle else {
+            NativeLog.runtimeError("neovim_runtime_create_failed")
             return nil
         }
         self.handle = handle
@@ -753,24 +940,12 @@ final class RustNeovimPane: NativePane {
         nvterm_nvim_exited(handle) != 0
     }
 
-    func currentWorkingDirectory() -> String? {
-        nil
-    }
-
-    func scroll(rows: Int) -> Int {
-        0
-    }
-
-    func frame() -> TerminalFrameSnapshot? {
-        decode(nvterm_nvim_frame_json(handle), as: TerminalFrameSnapshot.self)
+    func wakeupFD() -> Int32 {
+        nvterm_nvim_wakeup_fd(handle)
     }
 
     func rendererModel() -> NeovideRendererModelSnapshot? {
         decode(nvterm_nvim_renderer_model_json(handle), as: NeovideRendererModelSnapshot.self)
-    }
-
-    func rendererScrollPosition() -> Double {
-        0
     }
 
     func renderHandle() -> UnsafeMutableRawPointer? {
@@ -786,110 +961,13 @@ final class RustNeovimPane: NativePane {
         }
 
         let json = String(cString: pointer)
-        return try? JSONDecoder().decode(T.self, from: Data(json.utf8))
-    }
-}
-
-struct NeovimLaunchRequest {
-    let file: String?
-}
-
-struct TerminalInputCommandBuffer {
-    private(set) var command = ""
-
-    mutating func observe(_ data: Data) -> NeovimLaunchRequest? {
-        var request: NeovimLaunchRequest?
-        for byte in data {
-            if let next = observe(byte) {
-                request = next
-            }
-        }
-        return request
-    }
-
-    private mutating func observe(_ byte: UInt8) -> NeovimLaunchRequest? {
-        switch byte {
-        case 3, 21:
-            command.removeAll()
-            return nil
-        case 8, 127:
-            if !command.isEmpty {
-                command.removeLast()
-            }
-            return nil
-        case 10, 13:
-            defer {
-                command.removeAll()
-            }
-            return parseNeovimLaunch(command)
-        case 32...126:
-            command.append(Character(UnicodeScalar(byte)))
-            return nil
-        default:
+        do {
+            return try JSONDecoder().decode(T.self, from: Data(json.utf8))
+        } catch {
+            NativeLog.runtimeError("neovim_snapshot_decode_failed error=\(error)")
             return nil
         }
     }
-}
-
-private func parseNeovimLaunch(_ command: String) -> NeovimLaunchRequest? {
-    let tokens = shellLikeTokens(command.trimmingCharacters(in: .whitespacesAndNewlines))
-    guard let executable = tokens.first,
-          neovimExecutableNames.contains((executable as NSString).lastPathComponent)
-    else {
-        return nil
-    }
-
-    return NeovimLaunchRequest(file: tokens.dropFirst().first(where: neovimFileArgument))
-}
-
-private let neovimExecutableNames = ["nvim", "vim"]
-
-private func neovimFileArgument(_ token: String) -> Bool {
-    !token.isEmpty && !token.hasPrefix("-") && !token.hasPrefix("+")
-}
-
-private func shellLikeTokens(_ value: String) -> [String] {
-    var tokens: [String] = []
-    var current = ""
-    var quote: Character?
-    var escaping = false
-
-    for character in value {
-        if escaping {
-            current.append(character)
-            escaping = false
-            continue
-        }
-        if character == "\\" {
-            escaping = true
-            continue
-        }
-        if let activeQuote = quote {
-            if character == activeQuote {
-                quote = nil
-            } else {
-                current.append(character)
-            }
-            continue
-        }
-        if character == "'" || character == "\"" {
-            quote = character
-            continue
-        }
-        if character.isWhitespace {
-            if !current.isEmpty {
-                tokens.append(current)
-                current.removeAll()
-            }
-            continue
-        }
-        current.append(character)
-    }
-
-    if !current.isEmpty {
-        tokens.append(current)
-    }
-    return tokens
 }
 
 private func shellQuote(_ value: String) -> String {
@@ -922,41 +1000,47 @@ final class RenameTextField: NSTextField, NSTextFieldDelegate {
     }
 }
 
-final class TerminalTextView: NSView {
+final class TerminalTextView: NSView, NSTextInputClient {
     var onInput: ((Data) -> Void)?
+    var onKeyEvent: ((NSEvent, Bool) -> Bool)?
+    var onTextInput: ((String) -> Void)?
     var onMouseInput: ((NativeMouseInput) -> Bool)?
+    var onSelectionChanged: (((row: Int, col: Int), (row: Int, col: Int), Bool) -> Void)?
+    var onHyperlinkRequested: (((row: Int, col: Int)) -> Bool)?
+    var onCopyRequested: (() -> Bool)?
+    var onPasteRequested: (() -> Bool)?
+    var onSelectAllRequested: (() -> Bool)?
+    var onFindRequested: (() -> Bool)?
     var onScroll: ((CGFloat) -> Void)?
     var onTabSelected: ((Int) -> Void)?
+    var onPaneSelected: ((Int) -> Void)?
+    var onFocusChanged: ((Bool) -> Void)?
     var onContextMenuRequested: ((Int?, NSEvent, NSView) -> Void)?
     var onGeometryChanged: (() -> Void)?
     var onZoomIn: (() -> Void)?
     var onZoomOut: (() -> Void)?
     var onResetZoom: (() -> Void)?
+    var onFontSizeChanged: ((CGFloat) -> Void)?
 
     required init?(coder: NSCoder) {
         nil
     }
 
-    private var frameSnapshot: TerminalFrameSnapshot?
     private var rendererModelSnapshot: NeovideRendererModelSnapshot?
     private var rendererModelFrameCount = 0
-    private var externalRendererEnabled = false
     private var tabTitles: [String] = []
     private var tabThemes: [String] = []
     private var activeTab = 0
-    private var cursorTrailStart: NSPoint?
-    private var cursorTrailTarget: NSPoint?
-    private var cursorTrailStartedAt: TimeInterval?
-    private var scrollVisualOffsetRows: CGFloat = 0
-    private var scrollVelocityRows: CGFloat = 0
-    private var rowScrollAnimation: RowScrollAnimation?
-    private var lastScrollRegionShift: OutputScrollShift?
-    private var suppressNextOutputShiftAnimation = false
-    private var lastAnimationFrameAt = CACurrentMediaTime()
+    private var activePaneId: Int?
+    private var paneFrames: [Int: NSRect] = [:]
     private var terminalFontSize = defaultTerminalFontSize
     private var terminalFont = NSFont.monospacedSystemFont(ofSize: defaultTerminalFontSize, weight: .regular)
     private let tabFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
-    private let terminalTextColor = NSColor(calibratedRed: 0.90, green: 0.88, blue: 0.85, alpha: 1.0)
+    private var markedText = NSMutableAttributedString()
+    private var markedSelection = NSRange(location: 0, length: 0)
+    private var interpretingKeyEvent: NSEvent?
+    private var selectionAnchor: (row: Int, col: Int)?
+    private var terminalKeysDown = Set<UInt16>()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -965,7 +1049,7 @@ final class TerminalTextView: NSView {
 
     private func configure() {
         wantsLayer = true
-        layer?.backgroundColor = terminalBackground.cgColor
+        layer?.backgroundColor = NSColor.clear.cgColor
     }
 
     override var acceptsFirstResponder: Bool {
@@ -977,19 +1061,45 @@ final class TerminalTextView: NSView {
     }
 
     override var isOpaque: Bool {
-        !externalRendererEnabled
+        false
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        if !externalRendererEnabled {
-            terminalBackground.setFill()
-            dirtyRect.fill()
-        }
         drawTabStrip()
-        guard !externalRendererEnabled else {
-            return
+        drawScrollbar()
+        drawMarkedText()
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted {
+            onFocusChanged?(true)
         }
-        drawTerminalFrame()
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        if accepted {
+            onFocusChanged?(false)
+        }
+        return accepted
+    }
+
+    override func isAccessibilityElement() -> Bool {
+        true
+    }
+
+    override func accessibilityRole() -> NSAccessibility.Role? {
+        .textArea
+    }
+
+    override func accessibilityLabel() -> String? {
+        "Terminal"
+    }
+
+    override func accessibilityHelp() -> String? {
+        "Interactive terminal. Command-click links, and use Command-F to search scrollback."
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -1008,10 +1118,21 @@ final class TerminalTextView: NSView {
             super.keyDown(with: event)
             return
         }
-        guard let data = terminalInputData(for: event) else {
+        interpretingKeyEvent = event
+        let handled = inputContext?.handleEvent(event) ?? false
+        if !handled, !routeKeyEvent(event, released: false),
+           let data = terminalInputData(for: event) {
+            onInput?(data)
+        }
+        interpretingKeyEvent = nil
+    }
+
+    override func keyUp(with event: NSEvent) {
+        guard terminalKeysDown.remove(event.keyCode) != nil else {
+            super.keyUp(with: event)
             return
         }
-        onInput?(data)
+        _ = routeKeyEvent(event, released: true)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -1020,12 +1141,28 @@ final class TerminalTextView: NSView {
             onTabSelected?(index)
             return
         }
+        if let paneId = paneFrames.first(where: { $0.value.contains(point) })?.key,
+           paneId != activePaneId {
+            activePaneId = paneId
+            onPaneSelected?(paneId)
+        }
+        if event.modifierFlags.contains(.command),
+           let position = mouseGridPosition(point),
+           onHyperlinkRequested?(position) == true {
+            return
+        }
 
         window?.makeFirstResponder(self)
         guard let input = mouseInput(button: "left", action: "press", event: event, point: point) else {
             return
         }
-        _ = onMouseInput?(input)
+        if onMouseInput?(input) == true {
+            selectionAnchor = nil
+            return
+        }
+        let position = (row: Int(input.row), col: Int(input.col))
+        selectionAnchor = position
+        onSelectionChanged?(position, position, event.modifierFlags.contains(.option))
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -1033,12 +1170,84 @@ final class TerminalTextView: NSView {
         guard let input = mouseInput(button: "left", action: "release", event: event, point: point) else {
             return
         }
-        _ = onMouseInput?(input)
+        if onMouseInput?(input) == true {
+            selectionAnchor = nil
+            return
+        }
+        if let anchor = selectionAnchor {
+            onSelectionChanged?(
+                anchor,
+                (row: Int(input.row), col: Int(input.col)),
+                event.modifierFlags.contains(.option)
+            )
+        }
+        selectionAnchor = nil
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let input = mouseInput(button: "left", action: "drag", event: event, point: point) else {
+            return
+        }
+        if onMouseInput?(input) == true {
+            selectionAnchor = nil
+            return
+        }
+        if let anchor = selectionAnchor {
+            onSelectionChanged?(
+                anchor,
+                (row: Int(input.row), col: Int(input.col)),
+                event.modifierFlags.contains(.option)
+            )
+        }
     }
 
     override func rightMouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        if let input = mouseInput(button: "right", action: "press", event: event, point: point),
+           onMouseInput?(input) == true {
+            return
+        }
         onContextMenuRequested?(tabIndex(at: point), event, self)
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let input = mouseInput(
+            button: "right",
+            action: "release",
+            event: event,
+            point: point
+        ) else {
+            return
+        }
+        _ = onMouseInput?(input)
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let input = mouseInput(
+            button: "middle",
+            action: "press",
+            event: event,
+            point: point
+        ) else {
+            return
+        }
+        _ = onMouseInput?(input)
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let input = mouseInput(
+            button: "middle",
+            action: "release",
+            event: event,
+            point: point
+        ) else {
+            return
+        }
+        _ = onMouseInput?(input)
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -1059,22 +1268,23 @@ final class TerminalTextView: NSView {
         onScroll?(rows)
     }
 
-    func setFrame(_ frame: TerminalFrameSnapshot?) {
-        let nextFrame = materializedFrame(frame)
-        animateOutputShiftIfNeeded(nextFrame: nextFrame)
-        updateCursorTrail(to: nextFrame?.cursor)
-        frameSnapshot = nextFrame
-        rendererModelSnapshot = nil
-        needsDisplay = true
+    @objc func copy(_ sender: Any?) {
+        _ = onCopyRequested?()
+    }
+
+    @objc func paste(_ sender: Any?) {
+        _ = onPasteRequested?()
+    }
+
+    @objc override func selectAll(_ sender: Any?) {
+        _ = onSelectAllRequested?()
+    }
+
+    @objc func performFindPanelAction(_ sender: Any?) {
+        _ = onFindRequested?()
     }
 
     func setRendererModel(_ model: NeovideRendererModelSnapshot?) {
-        if externalRendererEnabled {
-            resetCursorTrail()
-        } else {
-            updateCursorTrail(to: model?.cursor)
-        }
-        frameSnapshot = nil
         rendererModelSnapshot = model
         if model != nil {
             rendererModelFrameCount += 1
@@ -1082,107 +1292,15 @@ final class TerminalTextView: NSView {
         needsDisplay = true
     }
 
-    private func materializedFrame(_ frame: TerminalFrameSnapshot?) -> TerminalFrameSnapshot? {
-        guard let frame else {
-            return nil
-        }
-        guard frame.full_refresh == false,
-              frame.rows.isEmpty,
-              let current = frameSnapshot
-        else {
-            return frame
-        }
-
-        var rows = current.rows
-        for update in frame.row_updates ?? [] where rows.indices.contains(update.row) {
-            rows[update.row] = update.cells
-        }
-        return frame.replacingRows(rows)
-    }
-
-    func advanceAnimation() {
-        advanceScrollAnimation()
-        guard let startedAt = cursorTrailStartedAt else {
-            return
-        }
-        if CACurrentMediaTime() - startedAt >= 0.16 {
-            cursorTrailStartedAt = nil
-        }
-        needsDisplay = true
-    }
-
-    func animateScrollRows(_ rows: Int, resetVelocity: Bool = false) {
-        guard rows != 0 else {
-            return
-        }
-        rowScrollAnimation = nil
-        scrollVisualOffsetRows += CGFloat(rows)
-        if resetVelocity {
-            scrollVelocityRows = 0
-        }
-        needsDisplay = true
-    }
-
-    func animateScrollRegion(_ shift: OutputScrollShift, previousRows: [[TerminalCellSnapshot]]) {
-        guard shift.rows != 0, shift.startRow <= shift.endRow else {
-            return
-        }
-
-        lastScrollRegionShift = shift
-        if let current = rowScrollAnimation,
-           current.startRow == shift.startRow,
-           current.endRow == shift.endRow,
-           current.startCol == shift.startCol,
-           current.endCol == shift.endCol {
-            rowScrollAnimation = RowScrollAnimation(
-                startRow: shift.startRow,
-                endRow: shift.endRow,
-                startCol: shift.startCol,
-                endCol: shift.endCol,
-                rows: shift.rows,
-                previousRows: previousRows,
-                visualOffsetRows: current.visualOffsetRows + CGFloat(shift.rows),
-                velocityRows: 0
-            )
-        } else {
-            rowScrollAnimation = RowScrollAnimation(
-                startRow: shift.startRow,
-                endRow: shift.endRow,
-                startCol: shift.startCol,
-                endCol: shift.endCol,
-                rows: shift.rows,
-                previousRows: previousRows,
-                visualOffsetRows: CGFloat(shift.rows),
-                velocityRows: 0
-            )
-        }
-        needsDisplay = true
-    }
-
-    func clearLastScrollRegionShift() {
-        lastScrollRegionShift = nil
-    }
-
-    func consumeLastScrollRegionShift() -> OutputScrollShift? {
-        defer {
-            lastScrollRegionShift = nil
-        }
-        return lastScrollRegionShift
-    }
-
-    func peekLastScrollRegionShift() -> OutputScrollShift? {
-        lastScrollRegionShift
-    }
-
     func hasRendererModelFrames() -> Bool {
         rendererModelFrameCount > 0
     }
 
     func rendererContentRowCount() -> Int {
-        if let rendererModelSnapshot {
-            return contentRowCount(rendererModelRows(rendererModelSnapshot))
+        guard let rendererModelSnapshot else {
+            return 0
         }
-        return frameSnapshot.map { contentRowCount($0.rows) } ?? 0
+        return contentRowCount(rendererModelRows(rendererModelSnapshot))
     }
 
     func rendererModelContainsTexts(_ needles: [String]) -> Bool {
@@ -1375,30 +1493,16 @@ final class TerminalTextView: NSView {
         .joined(separator: ":")
     }
 
-    func setExternalRendererEnabled(_ enabled: Bool) {
-        externalRendererEnabled = enabled
-        layer?.backgroundColor = enabled ? NSColor.clear.cgColor : terminalBackground.cgColor
-        if enabled {
-            resetCursorTrail()
-        }
-        needsDisplay = true
-    }
-
-    func resetScrollAnimation() {
-        scrollVisualOffsetRows = 0
-        scrollVelocityRows = 0
-        rowScrollAnimation = nil
-        lastScrollRegionShift = nil
-    }
-
-    func suppressNextOutputShift() {
-        suppressNextOutputShiftAnimation = true
-    }
-
     func updateTabs(_ titles: [String], themes: [String], active: Int) {
         tabTitles = titles
         tabThemes = themes
         activeTab = active
+        needsDisplay = true
+    }
+
+    func updatePaneFrames(_ frames: [Int: NSRect], activePaneId: Int?) {
+        paneFrames = frames
+        self.activePaneId = activePaneId
         needsDisplay = true
     }
 
@@ -1411,6 +1515,7 @@ final class TerminalTextView: NSView {
 
         terminalFontSize = clampedSize
         terminalFont = NSFont.monospacedSystemFont(ofSize: clampedSize, weight: .regular)
+        onFontSizeChanged?(clampedSize)
         needsDisplay = true
         onGeometryChanged?()
         return true
@@ -1429,7 +1534,12 @@ final class TerminalTextView: NSView {
     }
 
     func terminalGridSize() -> (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int) {
-        let textRect = terminalTextRect()
+        terminalGridSize(for: terminalTextRect())
+    }
+
+    func terminalGridSize(
+        for textRect: NSRect
+    ) -> (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int) {
         let cellSize = terminalCellSize()
         let cols = max(1, Int(textRect.width / cellSize.width))
         let rows = max(1, Int(textRect.height / cellSize.height))
@@ -1440,12 +1550,17 @@ final class TerminalTextView: NSView {
     }
 
     func skiaRenderGeometry() -> SkiaRenderGeometry {
-        let textRect = terminalTextRect()
+        skiaRenderGeometry(for: terminalTextRect())
+    }
+
+    func skiaRenderGeometry(for textRect: NSRect) -> SkiaRenderGeometry {
         let cellSize = terminalCellSize()
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
         return SkiaRenderGeometry(
             originX: Float(textRect.minX * scale),
             originY: Float(textRect.minY * scale),
+            contentWidth: Float(textRect.width * scale),
+            contentHeight: Float(textRect.height * scale),
             cellWidth: Float(cellSize.width * scale),
             cellHeight: Float(cellSize.height * scale)
         )
@@ -1460,6 +1575,46 @@ final class TerminalTextView: NSView {
             let theme = idx < tabThemes.count ? tabThemes[idx] : nil
             drawTab(title: tabTitles[idx], rect: rect, active: idx == activeTab, theme: theme)
         }
+        drawPaneBorders()
+    }
+
+    private func drawPaneBorders() {
+        guard paneFrames.count > 1 else {
+            return
+        }
+        for (paneId, rect) in paneFrames {
+            let path = NSBezierPath(rect: rect.insetBy(dx: 0.5, dy: 0.5))
+            path.lineWidth = paneId == activePaneId ? 2 : 1
+            (paneId == activePaneId
+                ? NSColor.controlAccentColor
+                : NSColor.separatorColor
+            ).setStroke()
+            path.stroke()
+        }
+    }
+
+    private func drawScrollbar() {
+        guard let scrollbar = rendererModelSnapshot?.scrollbar,
+              scrollbar.total > scrollbar.visible,
+              scrollbar.total > 0
+        else {
+            return
+        }
+        let textRect = terminalTextRect()
+        let track = NSRect(x: textRect.maxX - 5, y: textRect.minY, width: 4, height: textRect.height)
+        let visibleFraction = CGFloat(scrollbar.visible) / CGFloat(scrollbar.total)
+        let thumbHeight = max(18, track.height * visibleFraction)
+        let maxTop = scrollbar.total - scrollbar.visible
+        let historyOffset = maxTop == 0 ? 0 : CGFloat(scrollbar.top) / CGFloat(maxTop)
+        let thumbY = track.minY + (track.height - thumbHeight) * (1 - historyOffset)
+        NSColor.separatorColor.withAlphaComponent(0.35).setFill()
+        NSBezierPath(roundedRect: track, xRadius: 2, yRadius: 2).fill()
+        NSColor.secondaryLabelColor.withAlphaComponent(0.75).setFill()
+        NSBezierPath(
+            roundedRect: NSRect(x: track.minX, y: thumbY, width: track.width, height: thumbHeight),
+            xRadius: 2,
+            yRadius: 2
+        ).fill()
     }
 
     private func drawTab(title: String, rect: NSRect, active: Bool, theme: String?) {
@@ -1480,75 +1635,28 @@ final class TerminalTextView: NSView {
         (title as NSString).draw(in: textRect, withAttributes: attributes)
     }
 
-    private func drawTerminalFrame() {
-        if let rendererModelSnapshot {
-            drawNeovideRendererModel(rendererModelSnapshot)
-            return
-        }
-
-        guard let frameSnapshot else {
-            drawEmptyTerminal()
-            return
-        }
-
-        let textRect = terminalTextRect()
-        frameSnapshot.background.nsColor.setFill()
-        textRect.fill()
-
-        let cellSize = terminalCellSize()
-        NSGraphicsContext.saveGraphicsState()
-        textRect.clip()
-        drawTerminalRows(frameSnapshot.rows, textRect: textRect, cellSize: cellSize)
-        drawCursor(frameSnapshot.cursor, color: frameSnapshot.cursor_color, textRect: textRect, cellSize: cellSize)
-        NSGraphicsContext.restoreGraphicsState()
-        drawScrollbar(frameSnapshot.scrollbar, in: textRect)
-    }
-
-    private func drawNeovideRendererModel(_ model: NeovideRendererModelSnapshot) {
-        let textRect = terminalTextRect()
-        model.background.nsColor.setFill()
-        textRect.fill()
-
-        let cellSize = terminalCellSize()
-        let rows = rendererModelRows(model)
-        NSGraphicsContext.saveGraphicsState()
-        textRect.clip()
-        drawTerminalRows(rows, textRect: textRect, cellSize: cellSize)
-        drawCursor(model.cursor, color: model.cursor_color, textRect: textRect, cellSize: cellSize)
-        NSGraphicsContext.restoreGraphicsState()
-
-        if let scrollbar = frameSnapshot?.scrollbar {
-            drawScrollbar(scrollbar, in: textRect)
-        }
-    }
-
     private func rendererModelRows(_ model: NeovideRendererModelSnapshot) -> [[TerminalCellSnapshot]] {
         let mainWindow = model.windows.first { $0.grid_id == 1 }
         let grid = terminalGridSize()
         let rowCount = max(1, mainWindow?.height ?? grid.rows)
         let colCount = max(1, mainWindow?.width ?? grid.cols)
         var rows = Array(
-            repeating: rendererModelBlankRow(cols: colCount, foreground: model.cursor_color),
+            repeating: rendererModelBlankRow(cols: colCount),
             count: rowCount
         )
 
         for window in sortedRendererWindows(model.windows) where !window.hidden {
-            overlayRendererWindow(window, into: &rows, foreground: model.cursor_color)
+            overlayRendererWindow(window, into: &rows)
         }
         return rows
     }
 
-    private func rendererModelBlankRow(
-        cols: Int,
-        foreground: TerminalColorSnapshot
-    ) -> [TerminalCellSnapshot] {
+    private func rendererModelBlankRow(cols: Int) -> [TerminalCellSnapshot] {
         Array(
             repeating: TerminalCellSnapshot(
                 text: " ",
-                fg: foreground,
                 bg: nil,
-                blend: 0,
-                style: .plain
+                blend: 0
             ),
             count: cols
         )
@@ -1564,8 +1672,7 @@ final class TerminalTextView: NSView {
 
     private func overlayRendererWindow(
         _ window: NeovideRenderedWindowSnapshot,
-        into rows: inout [[TerminalCellSnapshot]],
-        foreground: TerminalColorSnapshot
+        into rows: inout [[TerminalCellSnapshot]]
     ) {
         let maxRow = min(window.height, window.lines.count)
         for sourceRow in 0..<maxRow {
@@ -1580,8 +1687,7 @@ final class TerminalTextView: NSView {
                 targetRow: targetRow,
                 left: window.left,
                 width: window.width,
-                rows: &rows,
-                foreground: foreground
+                rows: &rows
             )
         }
     }
@@ -1591,8 +1697,7 @@ final class TerminalTextView: NSView {
         targetRow: Int,
         left: Int,
         width: Int,
-        rows: inout [[TerminalCellSnapshot]],
-        foreground: TerminalColorSnapshot
+        rows: inout [[TerminalCellSnapshot]]
     ) {
         let targetWidth = min(width, line.cells.count)
         guard targetWidth > 0 else {
@@ -1601,495 +1706,12 @@ final class TerminalTextView: NSView {
 
         var row = rows[targetRow]
         if row.count < left + targetWidth {
-            row.append(contentsOf: rendererModelBlankRow(
-                cols: left + targetWidth - row.count,
-                foreground: foreground
-            ))
+            row.append(contentsOf: rendererModelBlankRow(cols: left + targetWidth - row.count))
         }
         for sourceCol in 0..<targetWidth {
             row[left + sourceCol] = line.cells[sourceCol]
         }
         rows[targetRow] = row
-    }
-
-    private func drawTerminalRows(
-        _ rows: [[TerminalCellSnapshot]],
-        textRect: NSRect,
-        cellSize: NSSize
-    ) {
-        guard let animation = rowScrollAnimation else {
-            let shiftedTextRect = textRect.offsetBy(
-                dx: 0,
-                dy: scrollVisualOffsetRows * cellSize.height
-            )
-            for (rowIndex, row) in rows.enumerated() {
-                drawTerminalRow(row, rowIndex: rowIndex, textRect: shiftedTextRect, cellSize: cellSize)
-            }
-            return
-        }
-
-        let baseTextRect = textRect.offsetBy(
-            dx: 0,
-            dy: scrollVisualOffsetRows * cellSize.height
-        )
-        for (rowIndex, row) in rows.enumerated() {
-            if animation.contains(row: rowIndex) {
-                drawTerminalRowOutsideScrollRegion(
-                    row,
-                    rowIndex: rowIndex,
-                    animation: animation,
-                    textRect: baseTextRect,
-                    cellSize: cellSize
-                )
-                continue
-            }
-            drawTerminalRow(row, rowIndex: rowIndex, textRect: baseTextRect, cellSize: cellSize)
-        }
-
-        NSGraphicsContext.saveGraphicsState()
-        frameSnapshot?.background.nsColor.setFill()
-        let regionRect = scrollRegionRect(animation, textRect: textRect, cellSize: cellSize)
-        regionRect.fill()
-        regionRect.clip()
-        let shiftedTextRect = baseTextRect.offsetBy(
-            dx: 0,
-            dy: animation.visualOffsetRows * cellSize.height
-        )
-        drawTerminalRows(
-            rows,
-            from: animation.startRow,
-            through: animation.endRow,
-            textRect: shiftedTextRect,
-            cellSize: cellSize
-        )
-        drawScrollAnimationGap(
-            animation,
-            regionRect: regionRect,
-            textRect: baseTextRect,
-            cellSize: cellSize
-        )
-        NSGraphicsContext.restoreGraphicsState()
-    }
-
-    private func drawScrollAnimationGap(
-        _ animation: RowScrollAnimation,
-        regionRect: NSRect,
-        textRect: NSRect,
-        cellSize: NSSize
-    ) {
-        let offsetRows = animation.visualOffsetRows
-        guard abs(offsetRows) > 0.01 else {
-            return
-        }
-
-        let gapHeight = min(abs(offsetRows) * cellSize.height, regionRect.height)
-        let gapRect: NSRect
-        if offsetRows > 0 {
-            gapRect = NSRect(
-                x: regionRect.minX,
-                y: regionRect.minY,
-                width: regionRect.width,
-                height: gapHeight
-            )
-        } else {
-            gapRect = NSRect(
-                x: regionRect.minX,
-                y: regionRect.maxY - gapHeight,
-                width: regionRect.width,
-                height: gapHeight
-            )
-        }
-
-        let previousTextRect = textRect.offsetBy(
-            dx: 0,
-            dy: (offsetRows - CGFloat(animation.rows)) * cellSize.height
-        )
-        NSGraphicsContext.saveGraphicsState()
-        gapRect.clip()
-        drawTerminalRows(
-            animation.previousRows,
-            from: animation.startRow,
-            through: animation.endRow,
-            textRect: previousTextRect,
-            cellSize: cellSize
-        )
-        NSGraphicsContext.restoreGraphicsState()
-    }
-
-    private func drawTerminalRows(
-        _ rows: [[TerminalCellSnapshot]],
-        from startRow: Int,
-        through endRow: Int,
-        textRect: NSRect,
-        cellSize: NSSize
-    ) {
-        let lastRow = min(endRow, rows.count - 1)
-        guard startRow <= lastRow else {
-            return
-        }
-        for rowIndex in startRow...lastRow {
-            drawTerminalRow(rows[rowIndex], rowIndex: rowIndex, textRect: textRect, cellSize: cellSize)
-        }
-    }
-
-    private func drawTerminalRowOutsideScrollRegion(
-        _ row: [TerminalCellSnapshot],
-        rowIndex: Int,
-        animation: RowScrollAnimation,
-        textRect: NSRect,
-        cellSize: NSSize
-    ) {
-        guard animation.isColumnBounded else {
-            return
-        }
-
-        let startCol = max(animation.startCol ?? 0, 0)
-        let endCol = min(animation.endCol ?? row.count - 1, row.count - 1)
-        if startCol > 0 {
-            drawTerminalRow(
-                row,
-                rowIndex: rowIndex,
-                textRect: textRect,
-                cellSize: cellSize,
-                fromCol: 0,
-                throughCol: startCol - 1
-            )
-        }
-        if endCol + 1 < row.count {
-            drawTerminalRow(
-                row,
-                rowIndex: rowIndex,
-                textRect: textRect,
-                cellSize: cellSize,
-                fromCol: endCol + 1,
-                throughCol: row.count - 1
-            )
-        }
-    }
-
-    private func drawTerminalRow(
-        _ row: [TerminalCellSnapshot],
-        rowIndex: Int,
-        textRect: NSRect,
-        cellSize: NSSize
-    ) {
-        drawTerminalRow(
-            row,
-            rowIndex: rowIndex,
-            textRect: textRect,
-            cellSize: cellSize,
-            fromCol: 0,
-            throughCol: row.count - 1
-        )
-    }
-
-    private func drawTerminalRow(
-        _ row: [TerminalCellSnapshot],
-        rowIndex: Int,
-        textRect: NSRect,
-        cellSize: NSSize,
-        fromCol: Int,
-        throughCol: Int
-    ) {
-        let y = textRect.minY + CGFloat(rowIndex) * cellSize.height
-        guard y < textRect.maxY, fromCol <= throughCol else {
-            return
-        }
-
-        let startCol = max(fromCol, 0)
-        let endCol = min(throughCol, row.count - 1)
-        guard startCol <= endCol else {
-            return
-        }
-
-        drawTerminalBackgroundRuns(
-            row,
-            rowIndex: rowIndex,
-            textRect: textRect,
-            cellSize: cellSize,
-            fromCol: startCol,
-            throughCol: endCol
-        )
-        drawTerminalTextRuns(
-            row,
-            rowIndex: rowIndex,
-            textRect: textRect,
-            cellSize: cellSize,
-            fromCol: startCol,
-            throughCol: endCol
-        )
-    }
-
-    private func drawTerminalBackgroundRuns(
-        _ row: [TerminalCellSnapshot],
-        rowIndex: Int,
-        textRect: NSRect,
-        cellSize: NSSize,
-        fromCol: Int,
-        throughCol: Int
-    ) {
-        var colIndex = fromCol
-        while colIndex <= throughCol {
-            guard let bg = row[colIndex].bg else {
-                colIndex += 1
-                continue
-            }
-
-            var endCol = colIndex
-            while endCol + 1 <= throughCol,
-                  row[endCol + 1].bg == bg,
-                  row[endCol + 1].blend == row[colIndex].blend {
-                endCol += 1
-            }
-
-            bg.nsColor.withAlphaComponent(backgroundAlpha(forBlend: row[colIndex].blend)).setFill()
-            let rect = NSRect(
-                x: textRect.minX + CGFloat(colIndex) * cellSize.width,
-                y: textRect.minY + CGFloat(rowIndex) * cellSize.height,
-                width: CGFloat(endCol - colIndex + 1) * cellSize.width,
-                height: cellSize.height
-            )
-            rect.fill()
-            colIndex = endCol + 1
-        }
-    }
-
-    private func drawTerminalTextRuns(
-        _ row: [TerminalCellSnapshot],
-        rowIndex: Int,
-        textRect: NSRect,
-        cellSize: NSSize,
-        fromCol: Int,
-        throughCol: Int
-    ) {
-        var colIndex = fromCol
-        while colIndex <= throughCol {
-            let cell = row[colIndex]
-            guard !cell.text.isEmpty else {
-                colIndex += 1
-                continue
-            }
-
-            var text = cell.text
-            var endCol = colIndex
-            while endCol + 1 <= throughCol,
-                  row[endCol + 1].fg == cell.fg,
-                  row[endCol + 1].style == cell.style,
-                  !row[endCol + 1].text.isEmpty {
-                endCol += 1
-                text += row[endCol].text
-            }
-
-            drawTerminalTextRun(
-                text,
-                fg: cell.fg,
-                style: cell.style,
-                rowIndex: rowIndex,
-                colIndex: colIndex,
-                textRect: textRect,
-                cellSize: cellSize
-            )
-            colIndex = endCol + 1
-        }
-    }
-
-    private func drawTerminalTextRun(
-        _ text: String,
-        fg: TerminalColorSnapshot,
-        style: TerminalCellStyleSnapshot,
-        rowIndex: Int,
-        colIndex: Int,
-        textRect: NSRect,
-        cellSize: NSSize
-    ) {
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: terminalFont(for: style),
-            .foregroundColor: fg.nsColor,
-            .underlineStyle: style.underline ? NSUnderlineStyle.single.rawValue : 0,
-            .strikethroughStyle: style.strikethrough ? NSUnderlineStyle.single.rawValue : 0,
-        ]
-        let textY = textRect.minY
-            + CGFloat(rowIndex) * cellSize.height
-            + max(0, (cellSize.height - terminalFont.pointSize) * 0.5 - 1)
-        (text as NSString).draw(
-            at: NSPoint(x: textRect.minX + CGFloat(colIndex) * cellSize.width, y: textY),
-            withAttributes: attributes
-        )
-    }
-
-    private func terminalFont(for style: TerminalCellStyleSnapshot) -> NSFont {
-        var traits: NSFontTraitMask = []
-        if style.bold {
-            traits.insert(.boldFontMask)
-        }
-        if style.italic {
-            traits.insert(.italicFontMask)
-        }
-        return NSFontManager.shared.convert(terminalFont, toHaveTrait: traits)
-    }
-
-    private func backgroundAlpha(forBlend blend: UInt8) -> CGFloat {
-        CGFloat(100 - min(blend, 100)) / 100.0
-    }
-
-    private func drawEmptyTerminal() {
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: terminalFont,
-            .foregroundColor: terminalTextColor,
-        ]
-        "".draw(in: terminalTextRect(), withAttributes: attributes)
-    }
-
-    private func drawCursor(
-        _ cursor: TerminalCursorSnapshot?,
-        color: TerminalColorSnapshot,
-        textRect: NSRect,
-        cellSize: NSSize
-    ) {
-        guard let cursor else {
-            return
-        }
-
-        let cursorRow = Int(cursor.y)
-        let cursorCol = Int(cursor.x)
-        let cursorTextRect = textRect.offsetBy(
-            dx: 0,
-            dy: rowVisualOffsetRows(cursorRow, col: cursorCol) * cellSize.height
-        )
-        if let clipRect = cursorClipRect(cursorRow, col: cursorCol, textRect: textRect, cellSize: cellSize) {
-            NSGraphicsContext.saveGraphicsState()
-            clipRect.clip()
-            drawCursorBody(cursor, color: color, textRect: cursorTextRect, cellSize: cellSize)
-            NSGraphicsContext.restoreGraphicsState()
-        } else {
-            drawCursorBody(cursor, color: color, textRect: cursorTextRect, cellSize: cellSize)
-        }
-    }
-
-    private func drawCursorBody(
-        _ cursor: TerminalCursorSnapshot,
-        color: TerminalColorSnapshot,
-        textRect: NSRect,
-        cellSize: NSSize
-    ) {
-        let rect = cursorRect(cursor, textRect: textRect, cellSize: cellSize)
-        drawCursorTrail(to: rect, color: color, textRect: textRect, cellSize: cellSize)
-        color.nsColor.withAlphaComponent(0.78).setFill()
-        switch cursor.style {
-        case "bar":
-            NSRect(
-                x: rect.minX,
-                y: rect.minY,
-                width: cursorThickness(cursor.cell_percentage, size: rect.width),
-                height: rect.height
-            ).fill()
-        case "underline":
-            let height = cursorThickness(cursor.cell_percentage, size: rect.height)
-            NSRect(x: rect.minX, y: rect.maxY - height, width: rect.width, height: height).fill()
-        default:
-            rect.fill()
-        }
-    }
-
-    private func cursorThickness(_ percentage: UInt8, size: CGFloat) -> CGFloat {
-        let fraction = CGFloat(max(1, min(percentage, 100))) / 100.0
-        return min(size, max(1, size * fraction))
-    }
-
-    private func drawCursorTrail(
-        to rect: NSRect,
-        color: TerminalColorSnapshot,
-        textRect: NSRect,
-        cellSize: NSSize
-    ) {
-        guard let tail = animatedCursorTail() else {
-            return
-        }
-
-        let tailRect = cursorRect(atGridPoint: tail, textRect: textRect, cellSize: cellSize)
-        let distance = hypot(rect.minX - tailRect.minX, rect.minY - tailRect.minY)
-        guard distance >= 0.75 else {
-            return
-        }
-
-        color.nsColor.withAlphaComponent(cursorTrailAlpha).setFill()
-        if let trail = cursorTrailRect(tail: tailRect, target: rect, cellSize: cellSize) {
-            trail.fill()
-            return
-        }
-
-        color.nsColor.withAlphaComponent(cursorTrailAlpha).setStroke()
-        let path = NSBezierPath()
-        path.lineCapStyle = .round
-        path.lineWidth = max(cellSize.width, cellSize.height) * 0.72
-        path.move(to: NSPoint(x: tailRect.midX, y: tailRect.midY))
-        path.line(to: NSPoint(x: rect.midX, y: rect.midY))
-        path.stroke()
-    }
-
-    private func cursorTrailRect(
-        tail: NSRect,
-        target: NSRect,
-        cellSize: NSSize
-    ) -> NSRect? {
-        let dx = abs(target.minX - tail.minX)
-        let dy = abs(target.minY - tail.minY)
-        if dx < 0.75 && dy < 0.75 {
-            return nil
-        }
-        if dy <= cellSize.height * 0.25 {
-            return NSRect(
-                x: min(tail.minX, target.minX),
-                y: target.minY,
-                width: dx + cellSize.width,
-                height: cellSize.height
-            )
-        }
-        if dx <= cellSize.width * 0.25 {
-            return NSRect(
-                x: target.minX,
-                y: min(tail.minY, target.minY),
-                width: cellSize.width,
-                height: dy + cellSize.height
-            )
-        }
-        return nil
-    }
-
-    private func drawScrollbar(_ scrollbar: ScrollbarSnapshot, in textRect: NSRect) {
-        guard scrollbar.total > scrollbar.visible, scrollbar.total > 0 else {
-            return
-        }
-
-        let ratio = CGFloat(scrollbar.visible) / CGFloat(scrollbar.total)
-        let thumbHeight = max(24, textRect.height * ratio)
-        let maxTop = max(1, CGFloat(scrollbar.total - scrollbar.visible))
-        let progress = CGFloat(scrollbar.top) / maxTop
-        let thumbY = textRect.minY + (textRect.height - thumbHeight) * progress
-        let rect = NSRect(
-            x: textRect.maxX - 4,
-            y: thumbY,
-            width: 3,
-            height: thumbHeight
-        )
-        NSColor.white.withAlphaComponent(0.22).setFill()
-        NSBezierPath(roundedRect: rect, xRadius: 1.5, yRadius: 1.5).fill()
-    }
-
-    private func animatedCursorTail() -> NSPoint? {
-        guard let start = cursorTrailStart,
-              let target = cursorTrailTarget,
-              let startedAt = cursorTrailStartedAt
-        else {
-            return nil
-        }
-
-        let progress = min(1, (CACurrentMediaTime() - startedAt) / 0.16)
-        let eased = 1 - pow(1 - progress, 3)
-        return NSPoint(
-            x: start.x + (target.x - start.x) * eased,
-            y: start.y + (target.y - start.y) * eased
-        )
     }
 
     private func tabIndex(at point: NSPoint) -> Int? {
@@ -2123,6 +1745,14 @@ final class TerminalTextView: NSView {
         }
 
         switch key {
+        case "c":
+            return onCopyRequested?() ?? false
+        case "v":
+            return onPasteRequested?() ?? false
+        case "a":
+            return onSelectAllRequested?() ?? false
+        case "f":
+            return onFindRequested?() ?? false
         case "=", "+":
             onZoomIn?()
             return true
@@ -2137,7 +1767,168 @@ final class TerminalTextView: NSView {
         }
     }
 
+    private func drawMarkedText() {
+        guard markedText.length > 0 else {
+            return
+        }
+        let textRect = terminalTextRect()
+        let cell = terminalCellSize()
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: terminalFont,
+            .foregroundColor: NSColor.textColor,
+            .backgroundColor: NSColor.selectedTextBackgroundColor,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ]
+        let value = NSAttributedString(string: markedText.string, attributes: attributes)
+        let origin = compositionOrigin()
+        value.draw(
+            in: NSRect(
+                x: origin.x,
+                y: origin.y,
+                width: max(cell.width, textRect.maxX - origin.x),
+                height: cell.height
+            )
+        )
+    }
+
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        let value = (string as? NSAttributedString)?.string ?? (string as? String ?? "")
+        let wasComposing = hasMarkedText()
+        unmarkText()
+        guard !value.isEmpty else {
+            return
+        }
+        if !wasComposing, let event = interpretingKeyEvent,
+           routeKeyEvent(event, released: false) {
+            return
+        }
+        onTextInput?(value)
+    }
+
+    override func doCommand(by selector: Selector) {
+        guard let event = interpretingKeyEvent else {
+            return
+        }
+        if !routeKeyEvent(event, released: false), let data = terminalInputData(for: event) {
+            onInput?(data)
+        }
+    }
+
+    func setMarkedText(
+        _ string: Any,
+        selectedRange: NSRange,
+        replacementRange: NSRange
+    ) {
+        if let attributed = string as? NSAttributedString {
+            markedText = NSMutableAttributedString(attributedString: attributed)
+        } else {
+            markedText = NSMutableAttributedString(string: string as? String ?? "")
+        }
+        markedSelection = clampedRange(selectedRange, length: markedText.length)
+        needsDisplay = true
+    }
+
+    func unmarkText() {
+        markedText = NSMutableAttributedString()
+        markedSelection = NSRange(location: 0, length: 0)
+        needsDisplay = true
+    }
+
+    func hasMarkedText() -> Bool {
+        markedText.length > 0
+    }
+
+    func markedRange() -> NSRange {
+        hasMarkedText() ? NSRange(location: 0, length: markedText.length) : NSRange(location: NSNotFound, length: 0)
+    }
+
+    func selectedRange() -> NSRange {
+        hasMarkedText() ? markedSelection : NSRange(location: 0, length: 0)
+    }
+
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] {
+        [.underlineStyle, .foregroundColor, .backgroundColor]
+    }
+
+    func attributedSubstring(
+        forProposedRange range: NSRange,
+        actualRange: NSRangePointer?
+    ) -> NSAttributedString? {
+        guard hasMarkedText() else {
+            actualRange?.pointee = NSRange(location: NSNotFound, length: 0)
+            return nil
+        }
+        let available = NSRange(location: 0, length: markedText.length)
+        let intersection = NSIntersectionRange(range, available)
+        guard intersection.location != NSNotFound, intersection.length > 0 else {
+            actualRange?.pointee = NSRange(location: NSNotFound, length: 0)
+            return nil
+        }
+        actualRange?.pointee = intersection
+        return markedText.attributedSubstring(from: intersection)
+    }
+
+    func characterIndex(for point: NSPoint) -> Int {
+        guard hasMarkedText() else {
+            return 0
+        }
+        let local = convert(point, from: nil)
+        let origin = compositionOrigin()
+        let index = Int(((local.x - origin.x) / terminalCellSize().width).rounded(.down))
+        return min(max(index, 0), markedText.length)
+    }
+
+    func firstRect(
+        forCharacterRange range: NSRange,
+        actualRange: NSRangePointer?
+    ) -> NSRect {
+        let origin = compositionOrigin()
+        actualRange?.pointee = clampedRange(range, length: max(markedText.length, 1))
+        let local = NSRect(
+            x: origin.x,
+            y: origin.y,
+            width: terminalCellSize().width,
+            height: terminalCellSize().height
+        )
+        return window?.convertToScreen(convert(local, to: nil)) ?? local
+    }
+
+    private func compositionOrigin() -> NSPoint {
+        let textRect = terminalTextRect()
+        let cell = terminalCellSize()
+        guard let cursor = rendererModelSnapshot?.cursor else {
+            return NSPoint(x: textRect.minX, y: textRect.maxY - cell.height)
+        }
+        return NSPoint(
+            x: textRect.minX + CGFloat(cursor.x) * cell.width,
+            y: textRect.minY + CGFloat(cursor.y) * cell.height
+        )
+    }
+
+    private func routeKeyEvent(_ event: NSEvent, released: Bool) -> Bool {
+        let handled = onKeyEvent?(event, released) ?? false
+        if handled, !released {
+            terminalKeysDown.insert(event.keyCode)
+        }
+        return handled
+    }
+
+    private func clampedRange(_ range: NSRange, length: Int) -> NSRange {
+        guard range.location != NSNotFound else {
+            return NSRange(location: length, length: 0)
+        }
+        let location = min(max(range.location, 0), length)
+        return NSRange(location: location, length: min(range.length, length - location))
+    }
+
     private func terminalTextRect() -> NSRect {
+        if let activePaneId, let frame = paneFrames[activePaneId] {
+            return frame
+        }
+        return terminalContentRect()
+    }
+
+    func terminalContentRect() -> NSRect {
         NSRect(
             x: terminalHorizontalInset,
             y: terminalTextTop,
@@ -2150,46 +1941,6 @@ final class TerminalTextView: NSView {
         let measured = ("M" as NSString).size(withAttributes: [.font: terminalFont])
         let lineHeight = terminalFont.ascender - terminalFont.descender + terminalFont.leading
         return NSSize(width: max(1, measured.width), height: max(1, lineHeight))
-    }
-
-    private func rowVisualOffsetRows(_ row: Int, col: Int) -> CGFloat {
-        guard let animation = rowScrollAnimation,
-              animation.contains(row: row, col: col)
-        else {
-            return scrollVisualOffsetRows
-        }
-        return scrollVisualOffsetRows + animation.visualOffsetRows
-    }
-
-    private func cursorClipRect(
-        _ row: Int,
-        col: Int,
-        textRect: NSRect,
-        cellSize: NSSize
-    ) -> NSRect? {
-        guard let animation = rowScrollAnimation,
-              animation.contains(row: row, col: col)
-        else {
-            return nil
-        }
-        return scrollRegionRect(animation, textRect: textRect, cellSize: cellSize)
-    }
-
-    private func scrollRegionRect(
-        _ animation: RowScrollAnimation,
-        textRect: NSRect,
-        cellSize: NSSize
-    ) -> NSRect {
-        let startCol = max(animation.startCol ?? 0, 0)
-        let endCol = animation.endCol.map { max($0, startCol) }
-        let x = textRect.minX + CGFloat(startCol) * cellSize.width
-        let width = endCol.map { CGFloat($0 - startCol + 1) * cellSize.width } ?? textRect.width
-        return NSRect(
-            x: x,
-            y: textRect.minY + CGFloat(animation.startRow) * cellSize.height,
-            width: min(width, textRect.maxX - x),
-            height: CGFloat(animation.endRow - animation.startRow + 1) * cellSize.height
-        )
     }
 
     private func scrollRows(for event: NSEvent) -> CGFloat {
@@ -2208,13 +1959,20 @@ final class TerminalTextView: NSView {
         guard let position = mouseGridPosition(point) else {
             return nil
         }
+        let textRect = terminalTextRect()
+        let cellSize = terminalCellSize()
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
         return NativeMouseInput(
             button: button,
             action: action,
             modifier: mouseModifierString(for: event),
             grid: 0,
             row: Int64(position.row),
-            col: Int64(position.col)
+            col: Int64(position.col),
+            surfaceX: Float((point.x - textRect.minX) * scale),
+            surfaceY: Float((point.y - textRect.minY) * scale),
+            cellWidth: UInt32(max(1, Int((cellSize.width * scale).rounded()))),
+            cellHeight: UInt32(max(1, Int((cellSize.height * scale).rounded())))
         )
     }
 
@@ -2271,552 +2029,12 @@ final class TerminalTextView: NSView {
         return modifier
     }
 
-    private func advanceScrollAnimation() {
-        let now = CACurrentMediaTime()
-        let dt = CGFloat(min(max(now - lastAnimationFrameAt, 0), 1.0 / 15.0))
-        lastAnimationFrameAt = now
-        var changed = false
-        changed = advanceSpring(offset: &scrollVisualOffsetRows, velocity: &scrollVelocityRows, dt: dt)
-
-        if var animation = rowScrollAnimation {
-            let rowChanged = advanceSpring(
-                offset: &animation.visualOffsetRows,
-                velocity: &animation.velocityRows,
-                dt: dt
-            )
-            rowScrollAnimation = rowChanged ? animation : nil
-            changed = changed || rowChanged
-        }
-
-        if changed {
-            needsDisplay = true
-        }
-    }
-
-    private func advanceSpring(
-        offset: inout CGFloat,
-        velocity: inout CGFloat,
-        dt: CGFloat
-    ) -> Bool {
-        guard offset != 0 || velocity != 0 else {
-            return false
-        }
-
-        let acceleration = -180.0 * offset - 27.0 * velocity
-        velocity += acceleration * dt
-        offset += velocity * dt
-        if abs(offset) < 0.002 && abs(velocity) < 0.002 {
-            offset = 0
-            velocity = 0
-            return false
-        }
-        return true
-    }
-
-    private func animateOutputShiftIfNeeded(nextFrame: TerminalFrameSnapshot?) {
-        if suppressNextOutputShiftAnimation {
-            suppressNextOutputShiftAnimation = false
-            return
-        }
-
-        guard let previousFrame = frameSnapshot,
-              let nextFrame
-        else {
-            return
-        }
-
-        if nextFrame.semantic_scroll == true {
-            animateSemanticScroll(nextFrame: nextFrame, previousFrame: previousFrame)
-            return
-        }
-
-        animateTerminalOutputShift(previousFrame: previousFrame, nextFrame: nextFrame)
-    }
-
-    private func animateSemanticScroll(
-        nextFrame: TerminalFrameSnapshot,
-        previousFrame: TerminalFrameSnapshot
-    ) {
-        rowScrollAnimation = nil
-        lastScrollRegionShift = nil
-        if let scrollHint = nextFrame.scroll_hint {
-            animateScrollRegion(scrollHint.outputShift, previousRows: previousFrame.rows)
-        }
-    }
-
-    private func animateTerminalOutputShift(
-        previousFrame: TerminalFrameSnapshot,
-        nextFrame: TerminalFrameSnapshot
-    ) {
-        if let shift = terminalOutputShift(from: previousFrame, to: nextFrame) {
-            animateScrollRegion(shift, previousRows: previousFrame.rows)
-        }
-    }
-
-    private func terminalOutputShift(
-        from previousFrame: TerminalFrameSnapshot,
-        to nextFrame: TerminalFrameSnapshot
-    ) -> OutputScrollShift? {
-        guard scrollbarIsAtBottom(nextFrame.scrollbar) else {
-            return nil
-        }
-
-        if let frameShift = detectTerminalFullFrameShift(
-            previous: previousFrame.rows,
-            current: nextFrame.rows
-        ) {
-            return frameShift
-        }
-
-        if let rowShift = detectTerminalScrollRegionShift(
-            previous: previousFrame.rows,
-            current: nextFrame.rows
-        ) {
-            return rowShift
-        }
-
-        if let jumpShift = detectTerminalJumpReplacementShift(from: previousFrame, to: nextFrame) {
-            return jumpShift
-        }
-
-        let totalDelta = nextFrame.scrollbar.total.saturatingSub(previousFrame.scrollbar.total)
-        let cappedRows = capOutputScrollRows(totalDelta, visibleRows: nextFrame.scrollbar.visible)
-        guard cappedRows != 0, !nextFrame.rows.isEmpty else {
-            return nil
-        }
-        return OutputScrollShift(startRow: 0, endRow: nextFrame.rows.count - 1, rows: cappedRows)
-    }
-
-    private func detectTerminalFullFrameShift(
-        previous: [[TerminalCellSnapshot]],
-        current: [[TerminalCellSnapshot]]
-    ) -> OutputScrollShift? {
-        guard previous.count == current.count,
-              previous.count >= 2,
-              previous != current
-        else {
-            return nil
-        }
-
-        let maxShift = min(previous.count - 1, maxScrollRegionDetectionRows)
-        var best: ScrollShiftCandidate?
-        for shift in 1...maxShift {
-            updateBestFullFrameShift(
-                previous: previous,
-                current: current,
-                shiftedRows: shift,
-                direction: 1,
-                best: &best
-            )
-            updateBestFullFrameShift(
-                previous: previous,
-                current: current,
-                shiftedRows: shift,
-                direction: -1,
-                best: &best
-            )
-        }
-
-        let requiredRows = max(minFullFrameScrollMatchRows, previous.count / 4)
-        guard let best, best.contentRows >= requiredRows else {
-            return nil
-        }
-        return clampShiftToScrollableRows(best.shift, rows: current)
-    }
-
-    private func updateBestFullFrameShift(
-        previous: [[TerminalCellSnapshot]],
-        current: [[TerminalCellSnapshot]],
-        shiftedRows: Int,
-        direction: Int,
-        best: inout ScrollShiftCandidate?
-    ) {
-        var matchedRows = 0
-        var contentRows = 0
-        var firstMatchedRow: Int?
-        var lastMatchedRow: Int?
-        let comparableRows = previous.count - shiftedRows
-        for row in 0..<comparableRows {
-            let previousRow = direction > 0 ? previous[row + shiftedRows] : previous[row]
-            let currentRow = direction > 0 ? current[row] : current[row + shiftedRows]
-            guard rowsMatchForScroll(previousRow, currentRow) else {
-                continue
-            }
-
-            firstMatchedRow = min(firstMatchedRow ?? row, row)
-            lastMatchedRow = max(lastMatchedRow ?? row, row)
-            matchedRows += 1
-            if rowHasScrollContent(previousRow) || rowHasScrollContent(currentRow) {
-                contentRows += 1
-            }
-        }
-
-        let score = contentRows * 100 + matchedRows
-        guard let firstMatchedRow,
-              let lastMatchedRow,
-              contentRows >= minFullFrameScrollMatchRows,
-              score > (best?.score ?? 0)
-        else {
-            return
-        }
-
-        best = ScrollShiftCandidate(
-            shift: OutputScrollShift(
-                startRow: firstMatchedRow,
-                endRow: lastMatchedRow + shiftedRows,
-                rows: direction * shiftedRows
-            ),
-            score: score,
-            contentRows: contentRows
-        )
-    }
-
-    private func detectTerminalJumpReplacementShift(
-        from previousFrame: TerminalFrameSnapshot,
-        to nextFrame: TerminalFrameSnapshot
-    ) -> OutputScrollShift? {
-        guard previousFrame.rows.count == nextFrame.rows.count,
-              previousFrame.rows != nextFrame.rows,
-              let previousCursor = previousFrame.cursor,
-              let nextCursor = nextFrame.cursor
-        else {
-            return nil
-        }
-
-        let previousContentRows = contentRowCount(previousFrame.rows)
-        let nextContentRows = contentRowCount(nextFrame.rows)
-        let cursorDelta = Int(nextCursor.y) - Int(previousCursor.y)
-        guard previousContentRows >= minJumpAnimationContentRows,
-              nextContentRows >= minJumpAnimationContentRows,
-              abs(cursorDelta) >= minJumpAnimationContentRows / 2
-        else {
-            return nil
-        }
-
-        let direction = cursorDelta > 0 ? 1 : -1
-        let rows = direction * jumpAnimationRows(visibleRows: nextFrame.rows.count)
-        return fullFrameShift(
-            rows: rows,
-            startRow: 0,
-            endRow: scrollableEndRow(in: nextFrame.rows)
-        )
-    }
-
-    private func detectTerminalScrollRegionShift(
-        previous: [[TerminalCellSnapshot]],
-        current: [[TerminalCellSnapshot]]
-    ) -> OutputScrollShift? {
-        guard previous.count == current.count,
-              previous.count >= 2,
-              previous != current
-        else {
-            return nil
-        }
-
-        let maxShift = min(previous.count - 1, maxScrollRegionDetectionRows)
-        var best: OutputScrollShift?
-        var bestScore = 0
-        for shift in 1...maxShift {
-            updateBestScrollRegion(
-                previous: previous,
-                current: current,
-                shiftedRows: shift,
-                direction: 1,
-                best: &best,
-                bestScore: &bestScore
-            )
-            updateBestScrollRegion(
-                previous: previous,
-                current: current,
-                shiftedRows: shift,
-                direction: -1,
-                best: &best,
-                bestScore: &bestScore
-            )
-        }
-        guard let best else {
-            return nil
-        }
-        return clampShiftToScrollableRows(best, rows: current)
-    }
-
-    private func updateBestScrollRegion(
-        previous: [[TerminalCellSnapshot]],
-        current: [[TerminalCellSnapshot]],
-        shiftedRows: Int,
-        direction: Int,
-        best: inout OutputScrollShift?,
-        bestScore: inout Int
-    ) {
-        var runStart: Int?
-        var runContentRows = 0
-        let comparableRows = previous.count - shiftedRows
-        for row in 0..<comparableRows {
-            let previousRow = direction > 0 ? previous[row + shiftedRows] : previous[row]
-            let currentRow = direction > 0 ? current[row] : current[row + shiftedRows]
-            let matches = rowsMatchForScroll(previousRow, currentRow)
-
-            if matches {
-                runStart = runStart ?? row
-                if rowHasScrollContent(previousRow) || rowHasScrollContent(currentRow) {
-                    runContentRows += 1
-                }
-                continue
-            }
-            finishScrollRegionRun(
-                runStart: &runStart,
-                runContentRows: &runContentRows,
-                runEnd: row - 1,
-                shiftedRows: shiftedRows,
-                direction: direction,
-                best: &best,
-                bestScore: &bestScore
-            )
-        }
-        finishScrollRegionRun(
-            runStart: &runStart,
-            runContentRows: &runContentRows,
-            runEnd: comparableRows - 1,
-            shiftedRows: shiftedRows,
-            direction: direction,
-            best: &best,
-            bestScore: &bestScore
-        )
-    }
-
-    private func finishScrollRegionRun(
-        runStart: inout Int?,
-        runContentRows: inout Int,
-        runEnd: Int,
-        shiftedRows: Int,
-        direction: Int,
-        best: inout OutputScrollShift?,
-        bestScore: inout Int
-    ) {
-        guard let start = runStart else {
-            return
-        }
-        defer {
-            runStart = nil
-            runContentRows = 0
-        }
-
-        let matchedRows = runEnd - start + 1
-        let score = runContentRows * 100 + matchedRows
-        guard matchedRows >= 2,
-              runContentRows >= minScrollRegionContentRows,
-              score > bestScore
-        else {
-            return
-        }
-
-        bestScore = score
-        if direction > 0 {
-            best = OutputScrollShift(
-                startRow: start,
-                endRow: runEnd + shiftedRows,
-                rows: shiftedRows
-            )
-        } else {
-            best = OutputScrollShift(
-                startRow: start,
-                endRow: runEnd + shiftedRows,
-                rows: -shiftedRows
-            )
-        }
-    }
-
-    private func rowsMatchForScroll(
-        _ previous: [TerminalCellSnapshot],
-        _ current: [TerminalCellSnapshot]
-    ) -> Bool {
-        if previous == current {
-            return true
-        }
-
-        let previousText = rowPlainText(previous)
-        let currentText = rowPlainText(current)
-        guard previousText.count > 8,
-              currentText.count > 8
-        else {
-            return false
-        }
-
-        let previousBody = scrollRowBody(previousText)
-        let currentBody = scrollRowBody(currentText)
-        return previousBody == currentBody && !previousBody.trimmingCharacters(in: .whitespaces).isEmpty
-    }
-
-    private func rowHasScrollContent(_ row: [TerminalCellSnapshot]) -> Bool {
-        let text = rowPlainText(row)
-        let body = scrollRowBody(text).trimmingCharacters(in: .whitespaces)
-        return !body.isEmpty || (text.count <= 8 && !text.trimmingCharacters(in: .whitespaces).isEmpty)
-    }
-
-    private func contentRowCount(_ rows: [[TerminalCellSnapshot]]) -> Int {
-        rows.reduce(0) { count, row in
-            rowHasScrollContent(row) ? count + 1 : count
-        }
-    }
-
-    private func clampShiftToScrollableRows(
-        _ shift: OutputScrollShift,
-        rows: [[TerminalCellSnapshot]]
-    ) -> OutputScrollShift? {
-        let endRow = min(shift.endRow, scrollableEndRow(in: rows))
-        return fullFrameShift(rows: shift.rows, startRow: shift.startRow, endRow: endRow)
-    }
-
-    private func scrollableEndRow(in rows: [[TerminalCellSnapshot]]) -> Int {
-        guard let fixedTailStart = fixedTailStart(in: rows) else {
-            return rows.count - 1
-        }
-        return max(0, fixedTailStart - 1)
-    }
-
-    private func fixedTailStart(in rows: [[TerminalCellSnapshot]]) -> Int? {
-        guard rows.count >= 4 else {
-            return nil
-        }
-
-        let firstCandidate = max(0, rows.count - 8)
-        for rowIndex in firstCandidate..<rows.count where rowLooksFixed(row: rows[rowIndex]) {
-            return rowIndex
-        }
-        return nil
-    }
-
-    private func rowLooksFixed(row: [TerminalCellSnapshot]) -> Bool {
-        let coloredCells = row.reduce(0) { count, cell in
-            cell.bg == nil ? count : count + 1
-        }
-        return coloredCells >= max(8, row.count / 4)
-    }
-
-    private func fullFrameShift(
-        rows: Int,
-        startRow: Int,
-        endRow: Int
-    ) -> OutputScrollShift? {
-        guard rows != 0, startRow <= endRow else {
-            return nil
-        }
-
-        return OutputScrollShift(
-            startRow: startRow,
-            endRow: endRow,
-            rows: cappedAnimationRows(rows, regionHeight: endRow - startRow + 1)
-        )
-    }
-
-    private func cappedAnimationRows(_ rows: Int, regionHeight: Int) -> Int {
-        let sign = rows < 0 ? -1 : 1
-        let maxRows = max(1, min(regionHeight - 1, maxFullFrameScrollAnimationRows))
-        return sign * min(abs(rows), maxRows)
-    }
-
-    private func jumpAnimationRows(visibleRows: Int) -> Int {
-        max(1, min(maxFullFrameScrollAnimationRows, max(1, visibleRows / 2)))
-    }
-
-    private func scrollRowBody(_ text: String) -> String {
-        guard text.count > 8 else {
-            return text
-        }
-        return String(text.dropFirst(8))
-    }
-
     private func rowPlainText(_ row: [TerminalCellSnapshot]) -> String {
         row.map(\.text).joined()
     }
 
-    private func scrollbarIsAtBottom(_ scrollbar: ScrollbarSnapshot) -> Bool {
-        scrollbar.total <= scrollbar.visible ||
-            scrollbar.top.saturatingAdd(scrollbar.visible) >= scrollbar.total
-    }
-
-    private func capOutputScrollRows(_ rows: UInt64, visibleRows: UInt64) -> Int {
-        let cappedRows: UInt64
-        if visibleRows > 0 && rows > visibleRows {
-            cappedRows = UInt64(outputScrollAnimationFarLines)
-        } else {
-            cappedRows = min(rows, UInt64(maxOutputScrollAnimationRows))
-        }
-        return Int(min(cappedRows, UInt64(Int.max)))
-    }
-
-    private func updateCursorTrail(to cursor: TerminalCursorSnapshot?) {
-        guard let cursor else {
-            cursorTrailStart = nil
-            cursorTrailTarget = nil
-            cursorTrailStartedAt = nil
-            return
-        }
-        let next = NSPoint(x: CGFloat(cursor.x), y: CGFloat(cursor.y))
-        if cursorTrailTarget == nil {
-            cursorTrailTarget = next
-            return
-        }
-        guard cursorTrailTarget != next else {
-            return
-        }
-
-        cursorTrailStart = animatedCursorTail() ?? cursorTrailTarget
-        cursorTrailTarget = next
-        cursorTrailStartedAt = CACurrentMediaTime()
-    }
-
-    private func resetCursorTrail() {
-        cursorTrailStart = nil
-        cursorTrailTarget = nil
-        cursorTrailStartedAt = nil
-    }
-
-    private func cursorRect(
-        _ cursor: TerminalCursorSnapshot,
-        textRect: NSRect,
-        cellSize: NSSize
-    ) -> NSRect {
-        cursorRect(
-            atGridPoint: NSPoint(x: CGFloat(cursor.x), y: CGFloat(cursor.y)),
-            textRect: textRect,
-            cellSize: cellSize
-        )
-    }
-
-    private func cursorRect(
-        atGridPoint point: NSPoint,
-        textRect: NSRect,
-        cellSize: NSSize
-    ) -> NSRect {
-        NSRect(
-            x: textRect.minX + point.x * cellSize.width,
-            y: textRect.minY + point.y * cellSize.height,
-            width: cellSize.width,
-            height: cellSize.height
-        )
-    }
-}
-
-extension TerminalColorSnapshot {
-    var nsColor: NSColor {
-        NSColor(
-            deviceRed: CGFloat(r) / 255,
-            green: CGFloat(g) / 255,
-            blue: CGFloat(b) / 255,
-            alpha: 1
-        )
-    }
-}
-
-extension UInt64 {
-    func saturatingAdd(_ value: UInt64) -> UInt64 {
-        let (result, overflow) = addingReportingOverflow(value)
-        return overflow ? UInt64.max : result
-    }
-
-    func saturatingSub(_ value: UInt64) -> UInt64 {
-        self >= value ? self - value : 0
+    private func contentRowCount(_ rows: [[TerminalCellSnapshot]]) -> Int {
+        rows.filter { !rowPlainText($0).trimmingCharacters(in: .whitespaces).isEmpty }.count
     }
 }
 
@@ -2851,6 +2069,116 @@ func terminalInputData(for event: NSEvent) -> Data? {
     default:
         return textInputData(for: event)
     }
+}
+
+private func terminalKeyText(_ event: NSEvent) -> String? {
+    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    let text = flags.contains(.control) || flags.contains(.option) || flags.contains(.command)
+        ? event.charactersIgnoringModifiers
+        : event.characters
+    guard let text, !text.isEmpty,
+          text.unicodeScalars.allSatisfy({ scalar in
+              !CharacterSet.controlCharacters.contains(scalar) &&
+                  !(0xF700...0xF8FF).contains(Int(scalar.value))
+          })
+    else {
+        return nil
+    }
+    return text
+}
+
+private func terminalModifierMask(_ flags: NSEvent.ModifierFlags) -> UInt32 {
+    var mask: UInt32 = 0
+    if flags.contains(.shift) {
+        mask |= 1 << 0
+    }
+    if flags.contains(.control) {
+        mask |= 1 << 1
+    }
+    if flags.contains(.option) {
+        mask |= 1 << 2
+    }
+    if flags.contains(.command) {
+        mask |= 1 << 3
+    }
+    if flags.contains(.capsLock) {
+        mask |= 1 << 4
+    }
+    if flags.contains(.numericPad) {
+        mask |= 1 << 5
+    }
+    return mask
+}
+
+private func terminalModifierMask(_ value: String) -> UInt32 {
+    var mask: UInt32 = 0
+    if value.contains("S") {
+        mask |= 1 << 0
+    }
+    if value.contains("C") {
+        mask |= 1 << 1
+    }
+    if value.contains("A") {
+        mask |= 1 << 2
+    }
+    if value.contains("D") {
+        mask |= 1 << 3
+    }
+    return mask
+}
+
+private func terminalMouseAction(_ action: String) -> UInt32 {
+    switch action {
+    case "release":
+        return 1
+    case "drag":
+        return 2
+    default:
+        return 0
+    }
+}
+
+private func terminalMouseButton(_ button: String, action: String) -> Int32 {
+    switch button {
+    case "left":
+        return 0
+    case "right":
+        return 1
+    case "middle":
+        return 2
+    case "wheel":
+        return action == "up" ? 3 : 4
+    default:
+        return -1
+    }
+}
+
+private func withUtf8(
+    _ text: String,
+    _ body: (UnsafePointer<UInt8>?, Int) -> Void
+) {
+    let data = Data(text.utf8)
+    data.withUnsafeBytes { buffer in
+        body(buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count)
+    }
+}
+
+private func ownedRustString(_ pointer: UnsafeMutablePointer<CChar>?) -> String? {
+    guard let pointer else {
+        return nil
+    }
+    defer {
+        nvterm_string_free(pointer)
+    }
+    return String(cString: pointer)
+}
+
+private func preferredBool(_ key: String, defaultValue: Bool) -> Bool {
+    let defaults = UserDefaults.standard
+    guard defaults.object(forKey: key) != nil else {
+        return defaultValue
+    }
+    return defaults.bool(forKey: key)
 }
 
 func textInputData(for event: NSEvent) -> Data? {
@@ -2910,28 +2238,6 @@ func metalObjectPointer(_ object: AnyObject) -> UnsafeMutableRawPointer {
     Unmanaged.passUnretained(object).toOpaque()
 }
 
-func sanitizedTerminalOutput(_ data: Data) -> String {
-    var text = String(decoding: data, as: UTF8.self)
-    text = stripAnsiSequences(text)
-    text = text.replacingOccurrences(of: "\r\n", with: "\n")
-    text = text.replacingOccurrences(of: "\r", with: "\n")
-    return text
-}
-
-func stripAnsiSequences(_ text: String) -> String {
-    var stripped = text.replacingOccurrences(
-        of: "\u{1B}\\[[0-?]*[ -/]*[@-~]",
-        with: "",
-        options: .regularExpression
-    )
-    stripped = stripped.replacingOccurrences(
-        of: "\u{1B}\\][^\u{7}]*(\u{7}|\u{1B}\\\\)",
-        with: "",
-        options: .regularExpression
-    )
-    return stripped
-}
-
 protocol TerminalContextMenuProvider: AnyObject {
     func terminalContextMenu(tabIndex: Int?) -> NSMenu
 }
@@ -2948,26 +2254,41 @@ final class TerminalMetalView: MTKView, MTKViewDelegate {
         fatalError("init(coder:) is not supported")
     }
 
-    init(frame frameRect: NSRect, contract: RendererContract?) {
+    init(frame frameRect: NSRect) {
         guard let device = MTLCreateSystemDefaultDevice(),
-              let commandQueue = device.makeCommandQueue()
+              let commandQueue = device.makeCommandQueue(),
+              let skiaRenderer = nvterm_skia_metal_create(
+                  metalObjectPointer(device),
+                  metalObjectPointer(commandQueue)
+        )
         else {
-            fatalError("Metal is not available")
+            fatalError("Metal/Skia initialization failed after capability preflight")
         }
 
         self.commandQueue = commandQueue
+        self.skiaRenderer = skiaRenderer
         super.init(frame: frameRect, device: device)
-        self.skiaRenderer = nvterm_skia_metal_create(
-            metalObjectPointer(device),
-            metalObjectPointer(commandQueue)
-        )
         colorPixelFormat = .bgra8Unorm
         clearColor = MTLClearColor(red: 0.078, green: 0.086, blue: 0.102, alpha: 1.0)
         enableSetNeedsDisplay = true
         isPaused = true
-        preferredFramesPerSecond = contract?.surface.preferred_frames_per_second ?? 120
+        preferredFramesPerSecond = 120
         delegate = self
         needsDisplay = true
+    }
+
+    static func isAvailable() -> Bool {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let commandQueue = device.makeCommandQueue(),
+              let renderer = nvterm_skia_metal_create(
+                  metalObjectPointer(device),
+                  metalObjectPointer(commandQueue)
+              )
+        else {
+            return false
+        }
+        nvterm_skia_metal_destroy(renderer)
+        return true
     }
 
     deinit {
@@ -3023,6 +2344,10 @@ final class TerminalMetalView: MTKView, MTKViewDelegate {
         skiaFrameCount = 0
     }
 
+    func forgetRuntime(_ runtime: UnsafeMutableRawPointer?) {
+        nvterm_skia_metal_forget_runtime(skiaRenderer, runtime)
+    }
+
     private func requestNextSkiaFrameIfNeeded(_ commandBuffer: MTLCommandBuffer) {
         let delayMs = nvterm_skia_metal_next_frame_delay_ms(skiaRenderer)
         guard delayMs != UInt64.max else {
@@ -3044,22 +2369,42 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     private let terminalTextView = TerminalTextView(frame: .zero)
     private let defaultPaneMode = NativePaneMode.current()
     private var terminalPanes: [Int: NativePane] = [:]
-    private var commandBuffers: [Int: TerminalInputCommandBuffer] = [:]
     private var scrollRemainders: [Int: CGFloat] = [:]
+    private var paneWorkingDirectories: [Int: String] = [:]
+    private var paneModes: [Int: NativePaneMode] = [:]
+    private var paneTitles: [Int: String] = [:]
+    private var lastSearchQuery = ""
+    private var optionAsAltEnabled = preferredBool(optionAsAltPreferenceKey, defaultValue: true)
+    private var notificationsEnabled = preferredBool(
+        notificationsPreferenceKey,
+        defaultValue: true
+    )
+    private var pendingPaneWorkingDirectory: String?
     private var activePaneId: Int?
     private var lastSnapshot: TerminalCoreSnapshot?
     private var lastNvimModelScrollShift: OutputScrollShift?
+    private var visiblePaneFrames: [Int: NSRect] = [:]
     private var nvimFileTreeSmokeTarget = "none"
-    private var frameTimer: Timer?
+    private var paneWakeupSources: [Int: DispatchSourceRead] = [:]
     private var syncingTabs = false
 
-    init(core: RustCore) {
+    init?(core: RustCore) {
+        guard TerminalMetalView.isAvailable() else {
+            NativeLog.runtimeError("metal_renderer_create_failed")
+            return nil
+        }
         self.core = core
-        self.metalView = TerminalMetalView(frame: .zero, contract: core.rendererContract())
+        self.metalView = TerminalMetalView(frame: .zero)
         super.init(nibName: nil, bundle: nil)
         self.metalView.contextMenuProvider = self
         self.terminalTextView.onTabSelected = { [weak self] index in
             self?.selectTab(index)
+        }
+        self.terminalTextView.onPaneSelected = { [weak self] paneId in
+            self?.selectPane(paneId)
+        }
+        self.terminalTextView.onFocusChanged = { [weak self] focused in
+            self?.setTerminalFocus(focused)
         }
         self.terminalTextView.onContextMenuRequested = { [weak self] tabIndex, event, view in
             guard let menu = self?.terminalContextMenu(tabIndex: tabIndex) else {
@@ -3073,8 +2418,32 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         self.terminalTextView.onInput = { [weak self] data in
             self?.writeToActivePane(data)
         }
+        self.terminalTextView.onKeyEvent = { [weak self] event, released in
+            self?.sendKeyToActivePane(event, released: released) ?? false
+        }
+        self.terminalTextView.onTextInput = { [weak self] text in
+            self?.writeTextToActivePane(text)
+        }
         self.terminalTextView.onMouseInput = { [weak self] input in
             self?.sendMouseInputToActivePane(input) ?? false
+        }
+        self.terminalTextView.onSelectionChanged = { [weak self] start, end, rectangular in
+            self?.selectTerminalText(start: start, end: end, rectangular: rectangular)
+        }
+        self.terminalTextView.onHyperlinkRequested = { [weak self] position in
+            self?.openTerminalHyperlink(position) ?? false
+        }
+        self.terminalTextView.onCopyRequested = { [weak self] in
+            self?.copySelection() ?? false
+        }
+        self.terminalTextView.onPasteRequested = { [weak self] in
+            self?.pasteClipboard() ?? false
+        }
+        self.terminalTextView.onSelectAllRequested = { [weak self] in
+            self?.selectAllTerminalText() ?? false
+        }
+        self.terminalTextView.onFindRequested = { [weak self] in
+            self?.findInScrollback() ?? false
         }
         self.terminalTextView.onScroll = { [weak self] rows in
             self?.scrollActivePane(deltaRows: rows)
@@ -3088,8 +2457,15 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         self.terminalTextView.onResetZoom = { [weak self] in
             self?.resetZoom(nil)
         }
+        self.terminalTextView.onFontSizeChanged = { size in
+            UserDefaults.standard.set(Double(size), forKey: fontSizePreferenceKey)
+        }
         self.metalView.renderProvider = { [weak self] texture, renderer in
             self?.renderActiveMetalFrame(texture: texture, renderer: renderer) ?? false
+        }
+        let storedFontSize = UserDefaults.standard.double(forKey: fontSizePreferenceKey)
+        if storedFontSize > 0 {
+            _ = self.terminalTextView.setTerminalFontSize(CGFloat(storedFontSize))
         }
     }
 
@@ -3098,7 +2474,12 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     deinit {
-        frameTimer?.invalidate()
+        for source in paneWakeupSources.values {
+            source.cancel()
+        }
+        for pane in terminalPanes.values {
+            metalView.forgetRuntime(pane.renderHandle())
+        }
     }
 
     override func loadView() {
@@ -3106,7 +2487,6 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         configureTabControl()
         metalView.translatesAutoresizingMaskIntoConstraints = false
         configureTerminalTextView()
-        terminalTextView.setExternalRendererEnabled(true)
         view.addSubview(metalView)
         metalView.addSubview(terminalTextView)
 
@@ -3124,8 +2504,8 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        restoreSessionIfNeeded()
         syncFromCore()
-        startFrameTimer()
     }
 
     func focusTerminal() {
@@ -3141,18 +2521,126 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     @objc func newTab(_ sender: Any?) {
+        pendingPaneWorkingDirectory = activeWorkingDirectory()
         core.newTab()
         syncFromCore()
     }
 
     @objc func splitVertical(_ sender: Any?) {
-        core.splitActive(axis: ffiSplitVertical)
+        pendingPaneWorkingDirectory = activeWorkingDirectory()
+        _ = core.splitActive(axis: ffiSplitVertical)
         syncFromCore()
     }
 
     @objc func splitHorizontal(_ sender: Any?) {
-        core.splitActive(axis: ffiSplitHorizontal)
+        pendingPaneWorkingDirectory = activeWorkingDirectory()
+        _ = core.splitActive(axis: ffiSplitHorizontal)
         syncFromCore()
+    }
+
+    @objc func openNativeNeovim(_ sender: Any?) {
+        guard let paneId = activePaneId else {
+            return
+        }
+        _ = switchTerminalPaneToNeovim(paneId: paneId)
+    }
+
+    @objc func closeActivePane(_ sender: Any?) {
+        guard let paneId = activePaneId, core.closePane(paneId) else {
+            return
+        }
+        removePaneRuntime(paneId)
+        scrollRemainders.removeValue(forKey: paneId)
+        paneWorkingDirectories.removeValue(forKey: paneId)
+        paneModes.removeValue(forKey: paneId)
+        paneTitles.removeValue(forKey: paneId)
+        guard let snapshot = core.snapshot(), !snapshot.tabs.isEmpty else {
+            NSApp.terminate(nil)
+            return
+        }
+        syncFromCore()
+    }
+
+    @objc func toggleOptionAsAlt(_ sender: Any?) {
+        optionAsAltEnabled.toggle()
+        UserDefaults.standard.set(optionAsAltEnabled, forKey: optionAsAltPreferenceKey)
+        for pane in terminalPanes.values {
+            (pane as? RustTerminalPane)?.setOptionAsAlt(optionAsAltEnabled)
+        }
+    }
+
+    @objc func toggleNotifications(_ sender: Any?) {
+        notificationsEnabled.toggle()
+        UserDefaults.standard.set(notificationsEnabled, forKey: notificationsPreferenceKey)
+    }
+
+    @objc func toggleSessionRestore(_ sender: Any?) {
+        let enabled = !preferredBool(sessionRestorePreferenceKey, defaultValue: true)
+        UserDefaults.standard.set(enabled, forKey: sessionRestorePreferenceKey)
+        if !enabled {
+            UserDefaults.standard.removeObject(forKey: sessionStatePreferenceKey)
+        }
+    }
+
+    func saveSessionState() {
+        guard preferredBool(sessionRestorePreferenceKey, defaultValue: true),
+              let state = currentSessionState()
+        else {
+            return
+        }
+        do {
+            let data = try JSONEncoder().encode(state)
+            UserDefaults.standard.set(data, forKey: sessionStatePreferenceKey)
+        } catch {
+            NativeLog.sessionWarning("session_encode_failed error=\(error)")
+        }
+    }
+
+    private func currentSessionState() -> NativeSessionState? {
+        guard let snapshot = lastSnapshot else {
+            return nil
+        }
+        let tabs = snapshot.tabs.compactMap { tab in
+            savedSessionPane(tab.layout, activePane: tab.active_pane).map { layout in
+                NativeSessionTab(title: tab.title, theme: tab.theme, layout: layout)
+            }
+        }
+        return NativeSessionState(
+            schemaVersion: currentSessionSchemaVersion,
+            activeTab: snapshot.active_tab,
+            tabs: tabs
+        )
+    }
+
+    private func savedSessionPane(
+        _ layout: PaneLayoutSnapshot,
+        activePane: Int
+    ) -> NativeSessionPane? {
+        if layout.kind == "leaf", let paneId = layout.pane_id {
+            let cwd = (terminalPanes[paneId] as? RustTerminalPane)?
+                .currentWorkingDirectory()
+                ?? paneWorkingDirectories[paneId]
+                ?? nativeWorkingDirectory()
+            let mode = terminalPanes[paneId]?.kind ?? paneModes[paneId] ?? defaultPaneMode
+            return NativeSessionPane(
+                kind: "leaf",
+                paneMode: mode.sessionValue,
+                cwd: cwd,
+                active: paneId == activePane
+            )
+        }
+        guard layout.kind == "split",
+              let axis = layout.axis,
+              let first = layout.first.flatMap({
+                  savedSessionPane($0, activePane: activePane)
+              }),
+              let second = layout.second.flatMap({
+                  savedSessionPane($0, activePane: activePane)
+              })
+        else {
+            return nil
+        }
+        return NativeSessionPane(kind: "split", axis: axis, first: first, second: second)
     }
 
     @objc func renameActiveTab(_ sender: Any?) {
@@ -3249,7 +2737,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         core.newTab()
         core.renameTab(1, title: "native smoke")
         core.setTheme("Harbor", tab: 1)
-        core.splitActive(axis: ffiSplitVertical)
+        _ = core.splitActive(axis: ffiSplitVertical)
         syncFromCore()
         writeToActivePane(Data("printf 'native pty view ready\\n'\r".utf8))
         guard let resultPath, !resultPath.isEmpty else {
@@ -3258,6 +2746,95 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.writeNativeSmokeResult(resultPath, retries: 12)
         }
+    }
+
+    func applySessionSchemaSmokeScenario(resultPath: String) {
+        _ = core.splitActive(axis: ffiSplitVertical)
+        _ = core.splitActive(axis: ffiSplitHorizontal)
+        syncFromCore()
+        guard let state = currentSessionState(),
+              let data = try? JSONEncoder().encode(state),
+              let decoded = decodeSessionState(data)
+        else {
+            writeSessionSmokeResult(resultPath, result: "failed session-schema encode\n")
+            return
+        }
+        let legacy = LegacyNativeSessionState(
+            activeTab: 0,
+            tabs: [LegacyNativeSessionTab(title: "legacy", theme: "Graphite", cwd: "/tmp")]
+        )
+        let migrated = (try? JSONEncoder().encode(legacy)).flatMap(decodeSessionState)
+        let corruptRejected = decodeSessionState(Data("{not-json".utf8)) == nil
+        let futureData = Data("{\"schemaVersion\":999}".utf8)
+        let futurePreserved = sessionSchemaVersion(in: futureData) == 999
+        let counts = sessionPaneCounts(decoded.tabs[decoded.activeTab].layout)
+        let ok = decoded.schemaVersion == currentSessionSchemaVersion
+            && counts.leaves == 3
+            && counts.splits == 2
+            && counts.activeLeaves == 1
+            && migrated?.schemaVersion == currentSessionSchemaVersion
+            && migrated?.tabs.first?.layout.kind == "leaf"
+            && corruptRejected
+            && futurePreserved
+        let status = ok ? "ok" : "failed"
+        writeSessionSmokeResult(
+            resultPath,
+            result: "\(status) session-schema version=\(decoded.schemaVersion) " +
+                "leaves=\(counts.leaves) splits=\(counts.splits) active=\(counts.activeLeaves) " +
+                "migration=\(migrated == nil ? "failed" : "ok") corruption=rejected future=preserved\n"
+        )
+    }
+
+    func applyTerminalResizeSmokeScenario(resultPath: String) {
+        guard let window = view.window else {
+            writeSessionSmokeResult(resultPath, result: "failed terminal-resize no-window\n")
+            return
+        }
+        window.setContentSize(NSSize(width: 780, height: 480))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self, weak window] in
+            guard let self, let window else {
+                return
+            }
+            let initial = terminalTextView.terminalGridSize()
+            window.setContentSize(NSSize(width: 1120, height: 760))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self else {
+                    return
+                }
+                resizeTerminalPanesToGrid()
+                let resized = terminalTextView.terminalGridSize()
+                let ok = resized.rows > initial.rows
+                    && resized.cols > initial.cols
+                    && terminalPanes[activePaneId ?? -1] != nil
+                let status = ok ? "ok" : "failed"
+                writeSessionSmokeResult(
+                    resultPath,
+                    result: "\(status) terminal-resize " +
+                        "from=\(initial.cols)x\(initial.rows) to=\(resized.cols)x\(resized.rows)\n"
+                )
+            }
+        }
+    }
+
+    private func sessionPaneCounts(
+        _ pane: NativeSessionPane
+    ) -> (leaves: Int, splits: Int, activeLeaves: Int) {
+        if pane.kind == "leaf" {
+            return (1, 0, pane.active ? 1 : 0)
+        }
+        let empty = (leaves: 0, splits: 0, activeLeaves: 0)
+        let first = pane.first.map(sessionPaneCounts) ?? empty
+        let second = pane.second.map(sessionPaneCounts) ?? empty
+        return (
+            first.leaves + second.leaves,
+            first.splits + second.splits + 1,
+            first.activeLeaves + second.activeLeaves
+        )
+    }
+
+    private func writeSessionSmokeResult(_ path: String, result: String) {
+        try? result.write(toFile: path, atomically: true, encoding: .utf8)
+        NSApp.terminate(nil)
     }
 
     func applyTerminalVimScrollSmokeScenario(resultPath: String) {
@@ -3312,7 +2889,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     func applyTerminalNvimHandoffSmokeScenario(resultPath: String) {
-        writeToActivePane(Data("nvim\r".utf8))
+        openNativeNeovim(nil)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.runNvimCommandOrWrite(
@@ -3345,7 +2922,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         writeToActivePane(Data("\(cwdCommand)\r".utf8))
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            self?.writeToActivePane(Data("nvim\r".utf8))
+            self?.openNativeNeovim(nil)
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
@@ -3366,7 +2943,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     func applyTerminalNvimQuitSmokeScenario(resultPath: String) {
-        writeToActivePane(Data("nvim\r".utf8))
+        openNativeNeovim(nil)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.runNvimCommandOrWrite("qa!", fallback: Data())
@@ -4550,33 +4127,23 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     private func clearSmokeScrollShift() {
-        if activePaneMode() == .neovim {
-            lastNvimModelScrollShift = nil
-            return
-        }
-        terminalTextView.clearLastScrollRegionShift()
+        lastNvimModelScrollShift = nil
     }
 
     private func consumeSmokeScrollShift() -> OutputScrollShift? {
-        if activePaneMode() == .neovim {
-            defer {
-                lastNvimModelScrollShift = nil
-            }
-            return lastNvimModelScrollShift
+        defer {
+            lastNvimModelScrollShift = nil
         }
-        return terminalTextView.consumeLastScrollRegionShift()
+        return lastNvimModelScrollShift
     }
 
     private func peekSmokeScrollShift() -> OutputScrollShift? {
-        if activePaneMode() == .neovim {
-            return lastNvimModelScrollShift
-        }
-        return terminalTextView.peekLastScrollRegionShift()
+        lastNvimModelScrollShift
     }
 
     private func activePaneRendererScrollPosition() -> Double {
         guard let paneId = activePaneId,
-              let pane = terminalPanes[paneId]
+              let pane = terminalPanes[paneId] as? RustTerminalPane
         else {
             return 0
         }
@@ -4614,11 +4181,8 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     @discardableResult
     private func runNvimCommand(_ command: String) -> Bool {
         guard let paneId = activePaneId,
-              let pane = terminalPanes[paneId]
+              let pane = terminalPanes[paneId] as? RustNeovimPane
         else {
-            return false
-        }
-        guard pane.kind == .neovim else {
             return false
         }
         let ok = pane.runCommand(command)
@@ -4629,7 +4193,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     private func runNvimCommand(_ command: String, paneId: Int, fallback: Data?) {
-        guard let pane = terminalPanes[paneId], pane.kind == .neovim else {
+        guard let pane = terminalPanes[paneId] as? RustNeovimPane else {
             return
         }
         if pane.runCommand(command) {
@@ -4647,12 +4211,21 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
         lastSnapshot = snapshot
         syncTabs(snapshot)
+        syncPaneLayout(snapshot)
         syncActivePane(snapshot)
         view.window?.title = windowTitle(snapshot)
     }
 
     private func selectTab(_ index: Int) {
         _ = core.selectTab(index)
+        syncFromCore()
+        focusTerminal()
+    }
+
+    private func selectPane(_ paneId: Int) {
+        guard core.selectPane(paneId) else {
+            return
+        }
         syncFromCore()
         focusTerminal()
     }
@@ -4680,6 +4253,76 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             active: snapshot.active_tab
         )
         syncingTabs = false
+    }
+
+    private func syncPaneLayout(_ snapshot: TerminalCoreSnapshot) {
+        guard let tab = snapshot.tabs.first(where: { $0.index == snapshot.active_tab }) else {
+            visiblePaneFrames = [:]
+            terminalTextView.updatePaneFrames([:], activePaneId: nil)
+            return
+        }
+        var frames: [Int: NSRect] = [:]
+        collectPaneFrames(
+            tab.layout,
+            rect: terminalTextView.terminalContentRect(),
+            frames: &frames
+        )
+        visiblePaneFrames = frames
+        terminalTextView.updatePaneFrames(frames, activePaneId: tab.active_pane)
+        for (paneId, frame) in frames {
+            terminalPane(for: paneId)?.resize(
+                grid: terminalTextView.terminalGridSize(for: frame)
+            )
+        }
+    }
+
+    private func collectPaneFrames(
+        _ layout: PaneLayoutSnapshot,
+        rect: NSRect,
+        frames: inout [Int: NSRect]
+    ) {
+        if layout.kind == "leaf", let paneId = layout.pane_id {
+            frames[paneId] = rect.insetBy(dx: 1, dy: 1)
+            return
+        }
+        guard let axis = layout.axis, let first = layout.first, let second = layout.second else {
+            return
+        }
+        if axis == "vertical" {
+            let firstWidth = floor(rect.width * 0.5)
+            collectPaneFrames(
+                first,
+                rect: NSRect(x: rect.minX, y: rect.minY, width: firstWidth, height: rect.height),
+                frames: &frames
+            )
+            collectPaneFrames(
+                second,
+                rect: NSRect(
+                    x: rect.minX + firstWidth,
+                    y: rect.minY,
+                    width: rect.width - firstWidth,
+                    height: rect.height
+                ),
+                frames: &frames
+            )
+        } else {
+            let firstHeight = floor(rect.height * 0.5)
+            collectPaneFrames(
+                first,
+                rect: NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: firstHeight),
+                frames: &frames
+            )
+            collectPaneFrames(
+                second,
+                rect: NSRect(
+                    x: rect.minX,
+                    y: rect.minY + firstHeight,
+                    width: rect.width,
+                    height: rect.height - firstHeight
+                ),
+                frames: &frames
+            )
+        }
     }
 
     private func themeMenuItem() -> NSMenuItem {
@@ -4732,21 +4375,19 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     private func configureTerminalTextView() {
         terminalTextView.translatesAutoresizingMaskIntoConstraints = false
         terminalTextView.wantsLayer = true
-        terminalTextView.layer?.backgroundColor = terminalBackground.cgColor
+        terminalTextView.layer?.backgroundColor = NSColor.clear.cgColor
         terminalTextView.layer?.zPosition = 1
     }
 
     private func syncActivePane(_ snapshot: TerminalCoreSnapshot) {
         guard let paneId = activePaneId(in: snapshot) else {
             activePaneId = nil
-            terminalTextView.setFrame(nil)
+            terminalTextView.setRendererModel(nil)
             return
         }
 
         if activePaneId != paneId {
-            terminalTextView.resetScrollAnimation()
             lastNvimModelScrollShift = nil
-            commandBuffers[paneId] = TerminalInputCommandBuffer()
         }
         activePaneId = paneId
         _ = terminalPane(for: paneId)
@@ -4762,36 +4403,55 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             return pane
         }
 
-        guard let pane = makePane(grid: terminalTextView.terminalGridSize()) else {
+        let cwd = paneWorkingDirectories[paneId]
+            ?? pendingPaneWorkingDirectory
+            ?? nativeWorkingDirectory()
+        pendingPaneWorkingDirectory = nil
+        let mode = paneModes[paneId] ?? defaultPaneMode
+        guard let pane = makePane(grid: paneGridSize(paneId), cwd: cwd, mode: mode) else {
             return nil
         }
         terminalPanes[paneId] = pane
+        installPaneWakeup(paneId: paneId, pane: pane)
+        paneModes[paneId] = pane.kind
+        paneWorkingDirectories[paneId] = cwd
+        (pane as? RustTerminalPane)?.setOptionAsAlt(optionAsAltEnabled)
         if pane.kind == .neovim {
             scheduleNvimDirectoryCorrection(
                 paneId: paneId,
-                directory: nativeWorkingDirectory()
+                directory: cwd
             )
         }
         return pane
     }
 
     private func makePane(
-        grid: (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int)
+        grid: (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int),
+        cwd: String,
+        mode: NativePaneMode
     ) -> NativePane? {
-        switch defaultPaneMode {
+        switch mode {
         case .terminal:
-            return RustTerminalPane(grid: grid)
+            return RustTerminalPane(grid: grid, cwd: cwd)
         case .neovim:
-            return RustNeovimPane(grid: grid, cwd: nativeWorkingDirectory())
+            return RustNeovimPane(grid: grid, cwd: cwd)
         }
     }
 
     private func resizeTerminalPanesToGrid() {
-        let gridSize = terminalTextView.terminalGridSize()
-        for pane in terminalPanes.values {
-            pane.resize(grid: gridSize)
+        if let snapshot = lastSnapshot {
+            syncPaneLayout(snapshot)
         }
         updateActiveFrame()
+    }
+
+    private func paneGridSize(
+        _ paneId: Int
+    ) -> (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int) {
+        guard let frame = visiblePaneFrames[paneId] else {
+            return terminalTextView.terminalGridSize()
+        }
+        return terminalTextView.terminalGridSize(for: frame)
     }
 
     private func writeToActivePane(_ data: Data) {
@@ -4800,107 +4460,294 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         else {
             return
         }
-        if handoffTerminalNeovimInput(data, paneId: paneId, pane: pane) {
-            return
-        }
         pane.write(data)
         drainTerminalPanes()
     }
 
-    private func sendMouseInputToActivePane(_ input: NativeMouseInput) -> Bool {
+    private func sendKeyToActivePane(_ event: NSEvent, released: Bool) -> Bool {
         guard let paneId = activePaneId,
-              let pane = terminalPanes[paneId],
-              pane.kind == .neovim
+              let pane = terminalPane(for: paneId) as? RustTerminalPane
         else {
             return false
         }
-        guard pane.mouse(input) else {
+        let handled = pane.key(event, released: released)
+        if handled {
+            drainTerminalPanes()
+        }
+        // The terminal encoder is authoritative even when a physical key has
+        // no terminal representation. Never fall back to hand-built escapes.
+        return true
+    }
+
+    private func writeTextToActivePane(_ text: String) {
+        guard let paneId = activePaneId,
+              let pane = terminalPane(for: paneId)
+        else {
+            return
+        }
+        if let terminal = pane as? RustTerminalPane {
+            terminal.writeText(text)
+        } else {
+            pane.write(Data(text.utf8))
+        }
+        drainTerminalPanes()
+    }
+
+    private func sendMouseInputToActivePane(_ input: NativeMouseInput) -> Bool {
+        guard let paneId = activePaneId, let pane = terminalPanes[paneId] else {
+            return false
+        }
+        let handled = if let terminal = pane as? RustTerminalPane {
+            terminal.mouse(input)
+        } else if let neovim = pane as? RustNeovimPane {
+            neovim.mouse(input)
+        } else {
+            false
+        }
+        guard handled else {
             return false
         }
         drainTerminalPanes()
         return true
     }
 
-    private func handoffTerminalNeovimInput(
-        _ data: Data,
-        paneId: Int,
-        pane: NativePane
-    ) -> Bool {
-        guard pane.kind == .terminal else {
-            return false
+    private func setTerminalFocus(_ focused: Bool) {
+        guard let paneId = activePaneId,
+              let terminal = terminalPanes[paneId] as? RustTerminalPane
+        else {
+            return
         }
-        var buffer = commandBuffers[paneId] ?? TerminalInputCommandBuffer()
-        let request = buffer.observe(data)
-        commandBuffers[paneId] = buffer
-        guard let request else {
-            return false
-        }
+        terminal.focus(focused)
+    }
 
-        pane.write(Data([0x15]))
-        _ = pane.drain()
-        scheduleTerminalNeovimHandoff(paneId: paneId, request: request, fallback: data)
+    private func selectTerminalText(
+        start: (row: Int, col: Int),
+        end: (row: Int, col: Int),
+        rectangular: Bool
+    ) {
+        guard let paneId = activePaneId,
+              let pane = terminalPanes[paneId] as? RustTerminalPane
+        else {
+            return
+        }
+        pane.select(start: start, end: end, rectangular: rectangular)
+        updateActiveFrame()
+    }
+
+    @discardableResult
+    private func copySelection() -> Bool {
+        guard let paneId = activePaneId,
+              let pane = terminalPanes[paneId] as? RustTerminalPane,
+              let text = pane.selectedText(),
+              !text.isEmpty
+        else {
+            return false
+        }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
         return true
     }
 
-    private func scheduleTerminalNeovimHandoff(
-        paneId: Int,
-        request: NeovimLaunchRequest,
-        fallback: Data,
-        attempts: Int = terminalNvimHandoffDrainAttempts
-    ) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + terminalNvimHandoffDrainInterval) { [weak self] in
-            self?.finishTerminalNeovimHandoff(
-                paneId: paneId,
-                request: request,
-                fallback: fallback,
-                attempts: attempts
-            )
+    private func openTerminalHyperlink(_ position: (row: Int, col: Int)) -> Bool {
+        guard let paneId = activePaneId,
+              let pane = terminalPanes[paneId] as? RustTerminalPane,
+              let value = pane.hyperlink(row: position.row, col: position.col),
+              let url = URL(string: value)
+        else {
+            return false
         }
+        return NSWorkspace.shared.open(url)
     }
 
-    private func finishTerminalNeovimHandoff(
-        paneId: Int,
-        request: NeovimLaunchRequest,
-        fallback: Data,
-        attempts: Int
-    ) {
-        guard let pane = terminalPanes[paneId], pane.kind == .terminal else {
+    @discardableResult
+    private func pasteClipboard() -> Bool {
+        guard let paneId = activePaneId,
+              let text = NSPasteboard.general.string(forType: .string),
+              !text.isEmpty
+        else {
+            return false
+        }
+        if let pane = terminalPanes[paneId] as? RustTerminalPane {
+            pane.paste(text)
+        } else {
+            terminalPanes[paneId]?.write(Data(text.utf8))
+        }
+        drainTerminalPanes()
+        return true
+    }
+
+    @discardableResult
+    private func selectAllTerminalText() -> Bool {
+        guard let paneId = activePaneId,
+              let pane = terminalPanes[paneId] as? RustTerminalPane
+        else {
+            return false
+        }
+        pane.selectAll()
+        updateActiveFrame()
+        return true
+    }
+
+    @discardableResult
+    private func findInScrollback() -> Bool {
+        guard let paneId = activePaneId,
+              let pane = terminalPanes[paneId] as? RustTerminalPane
+        else {
+            return false
+        }
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
+        input.stringValue = lastSearchQuery
+        let alert = NSAlert()
+        alert.messageText = "Find in Scrollback"
+        alert.accessoryView = input
+        alert.addButton(withTitle: "Find Next")
+        alert.addButton(withTitle: "Find Previous")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = input
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn || response == .alertSecondButtonReturn else {
+            focusTerminal()
+            return true
+        }
+        let query = input.stringValue
+        guard !query.isEmpty else {
+            focusTerminal()
+            return true
+        }
+        lastSearchQuery = query
+        let found = pane.find(query, backwards: response == .alertSecondButtonReturn)
+        if !found {
+            NSSound.beep()
+        }
+        updateActiveFrame()
+        focusTerminal()
+        return true
+    }
+
+    private func activeWorkingDirectory() -> String {
+        guard let paneId = activePaneId else {
+            return nativeWorkingDirectory()
+        }
+        let cwd = (terminalPanes[paneId] as? RustTerminalPane)?.currentWorkingDirectory()
+            ?? paneWorkingDirectories[paneId]
+            ?? nativeWorkingDirectory()
+        paneWorkingDirectories[paneId] = cwd
+        return cwd
+    }
+
+    private func restoreSessionIfNeeded() {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["NVTERM_NATIVE_SMOKE_SCENARIO"] == nil,
+              preferredBool(sessionRestorePreferenceKey, defaultValue: true),
+              let data = UserDefaults.standard.data(forKey: sessionStatePreferenceKey)
+        else {
             return
         }
-        let changed = pane.drain()
-        let minimumDrainRemaining = attempts >
-            terminalNvimHandoffDrainAttempts - terminalNvimHandoffMinimumDrainAttempts
-        if attempts > 0 && (minimumDrainRemaining || changed) {
-            scheduleTerminalNeovimHandoff(
-                paneId: paneId,
-                request: request,
-                fallback: fallback,
-                attempts: attempts - 1
-            )
+        if let schemaVersion = sessionSchemaVersion(in: data),
+           schemaVersion > currentSessionSchemaVersion {
+            NativeLog.sessionWarning("session_from_newer_version_preserved")
             return
         }
-        guard switchTerminalPaneToNeovim(paneId: paneId, request: request) else {
-            pane.write(fallback)
-            drainTerminalPanes()
+        guard let state = decodeSessionState(data), !state.tabs.isEmpty else {
+            NativeLog.sessionWarning("session_decode_failed state_removed=true")
+            UserDefaults.standard.removeObject(forKey: sessionStatePreferenceKey)
             return
         }
+        for (index, saved) in state.tabs.enumerated() {
+            if index > 0 {
+                core.newTab()
+            }
+            guard let snapshot = core.snapshot(),
+                  let tab = snapshot.tabs.first(where: { $0.index == index })
+            else {
+                continue
+            }
+            _ = core.selectTab(index)
+            core.renameTab(index, title: saved.title)
+            core.setTheme(saved.theme, tab: index)
+            if let activePane = restoreSessionPane(saved.layout, paneId: tab.active_pane) {
+                _ = core.selectPane(activePane)
+            }
+        }
+        _ = core.selectTab(min(max(state.activeTab, 0), state.tabs.count - 1))
+    }
+
+    private func decodeSessionState(_ data: Data) -> NativeSessionState? {
+        let decoder = JSONDecoder()
+        if let state = try? decoder.decode(NativeSessionState.self, from: data),
+           state.schemaVersion == currentSessionSchemaVersion {
+            return state
+        }
+        guard let legacy = try? decoder.decode(LegacyNativeSessionState.self, from: data) else {
+            return nil
+        }
+        return NativeSessionState(
+            schemaVersion: currentSessionSchemaVersion,
+            activeTab: legacy.activeTab,
+            tabs: legacy.tabs.map { tab in
+                NativeSessionTab(
+                    title: tab.title,
+                    theme: tab.theme,
+                    layout: NativeSessionPane(
+                        kind: "leaf",
+                        paneMode: NativePaneMode.terminal.sessionValue,
+                        cwd: tab.cwd,
+                        active: true
+                    )
+                )
+            }
+        )
+    }
+
+    private func sessionSchemaVersion(in data: Data) -> Int? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object["schemaVersion"] as? Int
+    }
+
+    private func restoreSessionPane(_ saved: NativeSessionPane, paneId: Int) -> Int? {
+        if saved.kind == "leaf" {
+            paneWorkingDirectories[paneId] = saved.cwd.isEmpty
+                ? nativeWorkingDirectory()
+                : saved.cwd
+            paneModes[paneId] = NativePaneMode(sessionValue: saved.paneMode)
+            return saved.active ? paneId : nil
+        }
+        guard saved.kind == "split",
+              let first = saved.first,
+              let second = saved.second,
+              core.selectPane(paneId)
+        else {
+            return nil
+        }
+        let axis = saved.axis == "horizontal" ? ffiSplitHorizontal : ffiSplitVertical
+        guard let secondPaneId = core.splitActive(axis: axis) else {
+            return nil
+        }
+        let firstActivePane = restoreSessionPane(first, paneId: paneId)
+        let secondActivePane = restoreSessionPane(second, paneId: secondPaneId)
+        return firstActivePane ?? secondActivePane
     }
 
     private func switchTerminalPaneToNeovim(
         paneId: Int,
-        request: NeovimLaunchRequest
+        file: String? = nil
     ) -> Bool {
-        let cwd = terminalPanes[paneId]?.currentWorkingDirectory() ?? nativeWorkingDirectory()
-        guard let pane = RustNeovimPane(grid: terminalTextView.terminalGridSize(), cwd: cwd) else {
+        let cwd = (terminalPanes[paneId] as? RustTerminalPane)?.currentWorkingDirectory()
+            ?? nativeWorkingDirectory()
+        guard let pane = RustNeovimPane(grid: paneGridSize(paneId), cwd: cwd) else {
             return false
         }
+        removePaneRuntime(paneId)
         terminalPanes[paneId] = pane
-        commandBuffers[paneId] = TerminalInputCommandBuffer()
+        installPaneWakeup(paneId: paneId, pane: pane)
+        paneModes[paneId] = .neovim
         scrollRemainders[paneId] = 0
-        terminalTextView.resetScrollAnimation()
         lastNvimModelScrollShift = nil
         scheduleNvimDirectoryCorrection(paneId: paneId, directory: cwd)
-        if let file = request.file {
+        if let file {
             scheduleNvimCommand(neovimEditCommand(file), paneId: paneId)
         }
         drainTerminalPanes()
@@ -4910,7 +4757,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
     private func scrollActivePane(deltaRows: CGFloat) {
         guard let paneId = activePaneId,
-              let pane = terminalPane(for: paneId)
+              let pane = terminalPane(for: paneId) as? RustTerminalPane
         else {
             return
         }
@@ -4924,8 +4771,6 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         guard movedRows != 0 else {
             return
         }
-        terminalTextView.animateScrollRows(movedRows)
-        terminalTextView.suppressNextOutputShift()
         updateActiveFrame()
     }
 
@@ -4965,11 +4810,27 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         value.replacingOccurrences(of: "'", with: "''")
     }
 
-    private func startFrameTimer() {
-        frameTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            self?.drainTerminalPanes()
-            self?.terminalTextView.advanceAnimation()
+    private func installPaneWakeup(paneId: Int, pane: NativePane) {
+        paneWakeupSources.removeValue(forKey: paneId)?.cancel()
+        let descriptor = pane.wakeupFD()
+        guard descriptor >= 0 else {
+            return
         }
+        let source = DispatchSource.makeReadSource(
+            fileDescriptor: descriptor,
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            self?.drainTerminalPanes()
+        }
+        paneWakeupSources[paneId] = source
+        source.resume()
+    }
+
+    private func removePaneRuntime(_ paneId: Int) {
+        paneWakeupSources.removeValue(forKey: paneId)?.cancel()
+        metalView.forgetRuntime(terminalPanes[paneId]?.renderHandle())
+        terminalPanes.removeValue(forKey: paneId)
     }
 
     private func drainTerminalPanes() {
@@ -4979,6 +4840,9 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         for (paneId, pane) in terminalPanes {
             let changed = pane.drain()
             activePaneChanged = activePaneChanged || (changed && paneId == activePaneId)
+            if let terminal = pane as? RustTerminalPane {
+                updateTerminalMetadata(terminal, paneId: paneId)
+            }
             if pane.kind == .neovim && pane.isExited() {
                 exitedNvimPanes.append(paneId)
             } else if pane.kind == .terminal && pane.isExited() {
@@ -5000,9 +4864,11 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     private func closeExitedTerminalPanes(_ paneIds: [Int]) -> Bool {
         var closed = false
         for paneId in paneIds {
-            terminalPanes.removeValue(forKey: paneId)
-            commandBuffers.removeValue(forKey: paneId)
+            removePaneRuntime(paneId)
             scrollRemainders.removeValue(forKey: paneId)
+            paneWorkingDirectories.removeValue(forKey: paneId)
+            paneModes.removeValue(forKey: paneId)
+            paneTitles.removeValue(forKey: paneId)
             closed = core.closePane(paneId) || closed
         }
         guard closed else {
@@ -5017,26 +4883,53 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     private func replaceExitedNeovimPane(_ paneId: Int) {
-        guard let pane = RustTerminalPane(grid: terminalTextView.terminalGridSize()) else {
-            terminalPanes.removeValue(forKey: paneId)
+        let cwd = paneWorkingDirectories[paneId] ?? nativeWorkingDirectory()
+        guard let pane = RustTerminalPane(
+            grid: paneGridSize(paneId),
+            cwd: cwd
+        ) else {
+            removePaneRuntime(paneId)
             return
         }
+        removePaneRuntime(paneId)
         terminalPanes[paneId] = pane
-        commandBuffers[paneId] = TerminalInputCommandBuffer()
+        pane.setOptionAsAlt(optionAsAltEnabled)
+        installPaneWakeup(paneId: paneId, pane: pane)
+        paneModes[paneId] = .terminal
         scrollRemainders[paneId] = 0
-        terminalTextView.resetScrollAnimation()
         lastNvimModelScrollShift = nil
+    }
+
+    private func updateTerminalMetadata(_ pane: RustTerminalPane, paneId: Int) {
+        if let cwd = pane.currentWorkingDirectory() {
+            paneWorkingDirectories[paneId] = cwd
+        }
+        if let title = pane.title(), paneTitles[paneId] != title {
+            paneTitles[paneId] = title
+            if let tab = lastSnapshot?.tabs.first(where: { $0.active_pane == paneId }) {
+                core.renameTab(tab.index, title: title)
+                syncFromCore()
+            }
+        }
+        let bells = pane.takeBellCount()
+        guard bells > 0 else {
+            return
+        }
+        NSSound.beep()
+        if notificationsEnabled, !NSApp.isActive {
+            NSApp.requestUserAttention(.informationalRequest)
+        }
     }
 
     private func updateActiveFrame() {
         guard let paneId = activePaneId,
               let pane = terminalPanes[paneId]
         else {
-            terminalTextView.setFrame(nil)
+            terminalTextView.setRendererModel(nil)
             return
         }
 
-        if pane.kind == .neovim, let model = pane.rendererModel() {
+        if let pane = pane as? RustNeovimPane, let model = pane.rendererModel() {
             if let scrollHint = model.scroll_hint {
                 lastNvimModelScrollShift = scrollHint.outputShift
             }
@@ -5045,7 +4938,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             return
         }
 
-        terminalTextView.setFrame(nil)
+        terminalTextView.setRendererModel(nil)
         metalView.needsDisplay = true
     }
 
@@ -5053,40 +4946,57 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         texture: MTLTexture,
         renderer: UnsafeMutableRawPointer?
     ) -> Bool {
-        guard let renderer,
-              let paneId = activePaneId,
-              let renderHandle = terminalPanes[paneId]?.renderHandle()
-        else {
+        guard let renderer else {
             return false
         }
-
-        let geometry = terminalTextView.skiaRenderGeometry()
-        let pane = terminalPanes[paneId]
-        if pane?.kind == .terminal {
-            return nvterm_skia_metal_render_terminal(
-                renderer,
-                renderHandle,
-                metalObjectPointer(texture),
-                Int32(texture.width),
-                Int32(texture.height),
-                geometry.originX,
-                geometry.originY,
-                geometry.cellWidth,
-                geometry.cellHeight
-            ) != 0
+        var frames = visiblePaneFrames.sorted { $0.key < $1.key }
+        if frames.isEmpty, let paneId = activePaneId {
+            frames = [(key: paneId, value: terminalTextView.terminalContentRect())]
         }
-
-        return nvterm_skia_metal_render_nvim(
-            renderer,
-            renderHandle,
-            metalObjectPointer(texture),
-            Int32(texture.width),
-            Int32(texture.height),
-            geometry.originX,
-            geometry.originY,
-            geometry.cellWidth,
-            geometry.cellHeight
-        ) != 0
+        var rendered = false
+        for (index, entry) in frames.enumerated() {
+            guard let pane = terminalPane(for: entry.key),
+                  let renderHandle = pane.renderHandle()
+            else {
+                continue
+            }
+            let geometry = terminalTextView.skiaRenderGeometry(for: entry.value)
+            let clear: UInt8 = index == 0 ? 1 : 0
+            let ok: Bool
+            if pane.kind == .terminal {
+                ok = nvterm_skia_metal_render_terminal(
+                    renderer,
+                    renderHandle,
+                    metalObjectPointer(texture),
+                    Int32(texture.width),
+                    Int32(texture.height),
+                    geometry.originX,
+                    geometry.originY,
+                    geometry.contentWidth,
+                    geometry.contentHeight,
+                    geometry.cellWidth,
+                    geometry.cellHeight,
+                    clear
+                ) != 0
+            } else {
+                ok = nvterm_skia_metal_render_nvim(
+                    renderer,
+                    renderHandle,
+                    metalObjectPointer(texture),
+                    Int32(texture.width),
+                    Int32(texture.height),
+                    geometry.originX,
+                    geometry.originY,
+                    geometry.contentWidth,
+                    geometry.contentHeight,
+                    geometry.cellWidth,
+                    geometry.cellHeight,
+                    clear
+                ) != 0
+            }
+            rendered = rendered || ok
+        }
+        return rendered
     }
 }
 
@@ -5095,12 +5005,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var shellController: TerminalShellViewController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NativeLog.started()
         guard let core = RustCore() else {
-            NSApp.terminate(nil)
+            presentFatalError(
+                title: "Terminal Core Failed",
+                message: "The Rust terminal core could not be initialized. Check Console for details."
+            )
             return
         }
 
-        let controller = TerminalShellViewController(core: core)
+        guard let controller = TerminalShellViewController(core: core) else {
+            presentFatalError(
+                title: "Metal Renderer Unavailable",
+                message: "A Metal-capable GPU and the bundled Skia renderer are required."
+            )
+            return
+        }
         let contentRect = NSRect(x: 0, y: 0, width: 1100, height: 720)
         let window = NSWindow(
             contentRect: contentRect,
@@ -5125,8 +5045,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scheduleSmokeShotIfNeeded(window)
     }
 
+    private func presentFatalError(title: String, message: String) {
+        NativeLog.runtimeError("fatal_error title=\(title) message=\(message)")
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "Quit")
+        alert.runModal()
+        NSApp.terminate(nil)
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if ProcessInfo.processInfo.environment["NVTERM_NATIVE_SMOKE_SCENARIO"] == nil {
+            shellController?.saveSessionState()
+        }
     }
 
     @objc func newTab(_ sender: Any?) {
@@ -5145,6 +5082,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         shellController?.renameActiveTab(sender)
     }
 
+    @objc func openNativeNeovim(_ sender: Any?) {
+        shellController?.openNativeNeovim(sender)
+    }
+
+    @objc func closeActivePane(_ sender: Any?) {
+        shellController?.closeActivePane(sender)
+    }
+
+    @objc func toggleOptionAsAlt(_ sender: NSMenuItem) {
+        shellController?.toggleOptionAsAlt(sender)
+        sender.state = sender.state == .on ? .off : .on
+    }
+
+    @objc func toggleNotifications(_ sender: NSMenuItem) {
+        shellController?.toggleNotifications(sender)
+        sender.state = sender.state == .on ? .off : .on
+    }
+
+    @objc func toggleSessionRestore(_ sender: NSMenuItem) {
+        shellController?.toggleSessionRestore(sender)
+        sender.state = sender.state == .on ? .off : .on
+    }
+
     @objc func zoomIn(_ sender: Any?) {
         shellController?.zoomIn(sender)
     }
@@ -5161,11 +5121,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         shellController?.selectTabFromShortcut(sender.tag)
     }
 
+    @objc func checkForUpdates(_ sender: Any?) {
+        guard let url = URL(string: "https://github.com/soyukke/neovide-tabs/releases/latest") else {
+            NativeLog.lifecycleError("update_url_invalid")
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
     private func buildMainMenu() {
         let mainMenu = NSMenu()
         mainMenu.addItem(appMenuItem())
+        mainMenu.addItem(editMenuItem())
         mainMenu.addItem(viewMenuItem())
         mainMenu.addItem(sessionMenuItem())
+        mainMenu.addItem(settingsMenuItem())
+        mainMenu.addItem(helpMenuItem())
         NSApp.mainMenu = mainMenu
     }
 
@@ -5185,6 +5156,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "terminal-exit-closes-tab":
             if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
                 controller.applyTerminalExitClosesTabSmokeScenario(resultPath: path)
+            }
+        case "session-schema":
+            if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
+                controller.applySessionSchemaSmokeScenario(resultPath: path)
+            }
+        case "terminal-resize":
+            if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
+                controller.applyTerminalResizeSmokeScenario(resultPath: path)
             }
         case "terminal-nvim-handoff":
             if let path = environment["NVTERM_NATIVE_SMOKE_RESULT"], !path.isEmpty {
@@ -5381,7 +5360,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func appMenuItem() -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu()
-        menu.addItem(withTitle: "Quit neovide-tabs", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(
+            withTitle: "About Neovide Tabs",
+            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            keyEquivalent: ""
+        )
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(
+            withTitle: "Quit Neovide Tabs",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
         item.submenu = menu
         return item
     }
@@ -5392,6 +5381,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(targetedItem("New Tab", #selector(newTab(_:)), "t"))
         menu.addItem(targetedItem("Split Vertical", #selector(splitVertical(_:)), "d"))
         menu.addItem(targetedItem("Split Horizontal", #selector(splitHorizontal(_:)), "D"))
+        menu.addItem(targetedItem("Close Pane", #selector(closeActivePane(_:)), "w"))
         menu.addItem(NSMenuItem.separator())
         for shortcutNumber in 1...9 {
             let title = shortcutNumber == 9 ? "Select Last Tab" : "Select Tab \(shortcutNumber)"
@@ -5401,6 +5391,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(NSMenuItem.separator())
         menu.addItem(targetedItem("Rename Session", #selector(renameActiveTab(_:)), "r"))
+        menu.addItem(targetedItem("Open Native Neovim", #selector(openNativeNeovim(_:)), "n"))
+        item.submenu = menu
+        return item
+    }
+
+    private func editMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "Edit")
+        menu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        menu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(
+            withTitle: "Find",
+            action: #selector(NSTextView.performFindPanelAction(_:)),
+            keyEquivalent: "f"
+        )
         item.submenu = menu
         return item
     }
@@ -5412,6 +5419,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(targetedItem("Zoom Out", #selector(zoomOut(_:)), "-"))
         menu.addItem(targetedItem("Actual Size", #selector(resetZoom(_:)), "0"))
         item.submenu = menu
+        return item
+    }
+
+    private func settingsMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "Settings")
+        menu.addItem(
+            toggleItem(
+                "Use Option as Alt",
+                #selector(toggleOptionAsAlt(_:)),
+                enabled: preferredBool(optionAsAltPreferenceKey, defaultValue: true)
+            )
+        )
+        menu.addItem(
+            toggleItem(
+                "Bell Notifications",
+                #selector(toggleNotifications(_:)),
+                enabled: preferredBool(notificationsPreferenceKey, defaultValue: true)
+            )
+        )
+        menu.addItem(
+            toggleItem(
+                "Restore Sessions",
+                #selector(toggleSessionRestore(_:)),
+                enabled: preferredBool(sessionRestorePreferenceKey, defaultValue: true)
+            )
+        )
+        item.submenu = menu
+        return item
+    }
+
+    private func helpMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "Help")
+        menu.addItem(targetedItem("Check for Updates…", #selector(checkForUpdates(_:)), ""))
+        item.submenu = menu
+        return item
+    }
+
+    private func toggleItem(
+        _ title: String,
+        _ action: Selector,
+        enabled: Bool
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.state = enabled ? .on : .off
         return item
     }
 

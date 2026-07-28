@@ -1,0 +1,12 @@
+title = "neovide-tabs secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Generated dependency and native build outputs"
+paths = [
+  '''^target/''',
+  '''^spikes/macos-shell/\.build/''',
+  '''^\.git/''',
+]

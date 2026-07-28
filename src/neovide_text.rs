@@ -1,4 +1,6 @@
-use crate::terminal_runtime::{TerminalCellSnapshot, TerminalCellStyle, TerminalColor};
+use crate::terminal_runtime::{
+    TerminalCellSnapshot, TerminalCellStyle, TerminalColor, TerminalUnderlineStyle,
+};
 use lru::LruCache;
 use skia_safe::{
     Canvas, Color, Data, Font, FontHinting as SkiaHinting, FontMgr, FontStyle, Paint, Point,
@@ -6,7 +8,13 @@ use skia_safe::{
     font::Edging as SkiaEdging,
     graphics::{font_cache_limit, font_cache_used, set_font_cache_limit},
 };
-use std::{collections::HashSet, env, fs, num::NonZeroUsize, rc::Rc};
+use std::{
+    collections::HashSet,
+    env, fs,
+    num::NonZeroUsize,
+    rc::Rc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use swash::{
     Metrics,
     shape::ShapeContext,
@@ -68,6 +76,9 @@ impl NeovideTextRenderer {
     }
 
     fn draw_run(&mut self, canvas: &Canvas, run: &TextRun, row: f32, window_left: usize) {
+        if run.style.blink && !blink_text_visible() {
+            return;
+        }
         let baseline = self.shaper.baseline_offset();
         let origin = self.run_origin(row, window_left + run.start_col, baseline);
         let mut paint = Paint::default();
@@ -94,7 +105,7 @@ impl NeovideTextRenderer {
         left: usize,
         paint: &Paint,
     ) {
-        if !run.style.underline && !run.style.strikethrough {
+        if !run.style.underline && !run.style.strikethrough && !run.style.overline {
             return;
         }
         let start_x =
@@ -102,11 +113,74 @@ impl NeovideTextRenderer {
         let end_x = start_x + run.key.cells.len() as f32 * self.geometry.cell_width;
         if run.style.underline {
             let y = self.decoration_y(row, 0.86);
-            canvas.draw_line((start_x, y), (end_x, y), paint);
+            let mut underline_paint = paint.clone();
+            if let Some(underline_color) = run.style.underline_color {
+                underline_paint.set_color(color(underline_color));
+            }
+            self.draw_underline(
+                canvas,
+                start_x,
+                end_x,
+                y,
+                run.style.underline_style,
+                &underline_paint,
+            );
         }
         if run.style.strikethrough {
             let y = self.decoration_y(row, 0.54);
             canvas.draw_line((start_x, y), (end_x, y), paint);
+        }
+        if run.style.overline {
+            let y = self.decoration_y(row, 0.12);
+            canvas.draw_line((start_x, y), (end_x, y), paint);
+        }
+    }
+
+    fn draw_underline(
+        &self,
+        canvas: &Canvas,
+        start_x: f32,
+        end_x: f32,
+        y: f32,
+        style: TerminalUnderlineStyle,
+        paint: &Paint,
+    ) {
+        match style {
+            TerminalUnderlineStyle::Double => {
+                canvas.draw_line((start_x, y - 1.5), (end_x, y - 1.5), paint);
+                canvas.draw_line((start_x, y + 1.5), (end_x, y + 1.5), paint);
+            }
+            TerminalUnderlineStyle::Curly => {
+                let step = (self.geometry.cell_width / 3.0).max(2.0);
+                let mut x = start_x;
+                let mut up = true;
+                while x < end_x {
+                    let next = (x + step).min(end_x);
+                    let next_y = if up { y - 1.5 } else { y + 1.5 };
+                    canvas.draw_line((x, y), (next, next_y), paint);
+                    x = next;
+                    up = !up;
+                }
+            }
+            TerminalUnderlineStyle::Dotted => {
+                let step = 3.0;
+                let mut x = start_x;
+                while x <= end_x {
+                    canvas.draw_circle((x, y), 0.8, paint);
+                    x += step;
+                }
+            }
+            TerminalUnderlineStyle::Dashed => {
+                let mut x = start_x;
+                while x < end_x {
+                    let dash_end = (x + 4.0).min(end_x);
+                    canvas.draw_line((x, y), (dash_end, y), paint);
+                    x += 7.0;
+                }
+            }
+            _ => {
+                canvas.draw_line((start_x, y), (end_x, y), paint);
+            }
         }
     }
 
@@ -127,6 +201,12 @@ fn font_size(geometry: TextGridGeometry) -> f32 {
 
 fn color(color: TerminalColor) -> Color {
     Color::from_argb(255, color.r, color.g, color.b)
+}
+
+fn blink_text_visible() -> bool {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(true, |duration| duration.as_millis() % 1_000 < 500)
 }
 
 #[derive(Debug, PartialEq, Eq)]

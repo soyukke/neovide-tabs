@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+app="spikes/macos-shell/.build/NativeShellSpike"
+result_file="spikes/macos-shell/.build/native-resize.result"
+log_file="/tmp/neovide-tabs-resize.log"
+
+rm -f -- "$result_file" "$log_file"
+NVTERM_NATIVE_SMOKE_SCENARIO=terminal-resize \
+  NVTERM_NATIVE_SMOKE_RESULT="$result_file" \
+  "$app" >"$log_file" 2>&1
+
+if [[ ! -s "$result_file" ]]; then
+  echo "native resize smoke failed before result was written" >&2
+  sed -n '1,160p' "$log_file" >&2 || true
+  exit 1
+fi
+
+result="$(cat "$result_file")"
+printf '%s\n' "$result"
+[[ "$result" == ok\ terminal-resize* ]]
