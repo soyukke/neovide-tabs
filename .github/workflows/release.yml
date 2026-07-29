@@ -67,7 +67,7 @@ jobs:
           nix develop --command just native-package-smoke
 
       - name: Attest release provenance
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             spikes/macos-shell/.build/release/Neovide-Tabs-*-macOS-arm64.zip
