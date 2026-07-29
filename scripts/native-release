@@ -32,12 +32,42 @@ fi
 archive_name="Neovide-Tabs-${version}-macOS-${architecture}.zip"
 archive="$release_root/$archive_name"
 manifest="$release_root/latest.json"
+update_key_config="assets/update-signing-public-key.json"
 base_url="${NVTERM_RELEASE_BASE_URL:-https://github.com/soyukke/neovide-tabs/releases/download/v$version}"
 
 mkdir -p "$release_root"
 rm -f -- "$archive" "$manifest"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$app_path" "$archive"
 sha256="$(/usr/bin/shasum -a 256 "$archive" | awk '{print $1}')"
+archive_size="$(/usr/bin/stat -f '%z' "$archive")"
+signature_json="null"
+if [[ -n "${UPDATE_SIGNING_PRIVATE_KEY_B64:-}" ]]; then
+  sdk="$(env -u SDKROOT -u DEVELOPER_DIR /usr/bin/xcrun --sdk macosx --show-sdk-path)"
+  signer="$release_root/sign-update.$$"
+  trap 'rm -f "$signer"' EXIT INT TERM
+  env -u SDKROOT -u DEVELOPER_DIR \
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc \
+    -O \
+    -sdk "$sdk" \
+    -target "arm64-apple-macos$minimum_macos" \
+    scripts/sign-update.swift \
+    -framework CryptoKit \
+    -o "$signer"
+  signing_output="$("$signer" "$archive")"
+  rm -f "$signer"
+  trap - EXIT INT TERM
+  expected_public_key="$(jq -r .publicKey "$update_key_config")"
+  expected_key_id="$(jq -r .keyID "$update_key_config")"
+  test "$(jq -r .algorithm <<<"$signing_output")" = "ed25519"
+  test "$(jq -r .publicKey <<<"$signing_output")" = "$expected_public_key"
+  signature_json="$(
+    jq -n \
+      --arg algorithm "ed25519" \
+      --arg key_id "$expected_key_id" \
+      --arg value "$(jq -r .signature <<<"$signing_output")" \
+      '{algorithm: $algorithm, keyID: $key_id, value: $value}'
+  )"
+fi
 
 jq -n \
   --arg version "$version" \
@@ -46,27 +76,40 @@ jq -n \
   --arg architecture "$architecture" \
   --arg channel "$release_channel" \
   --arg archive "$archive_name" \
+  --argjson archive_size "$archive_size" \
   --arg sha256 "$sha256" \
   --arg download_url "$base_url/$archive_name" \
   --argjson notarized "$notarized" \
+  --argjson signature "$signature_json" \
   '{
-    schemaVersion: 1,
+    schemaVersion: 2,
     version: $version,
     build: $build,
     channel: $channel,
     minimumMacOS: $minimum_macos,
     architecture: $architecture,
     archive: $archive,
+    archiveSize: $archive_size,
     sha256: $sha256,
     downloadURL: $download_url,
-    notarized: $notarized
+    notarized: $notarized,
+    signature: $signature
   }' >"$manifest"
 
 jq -e '
-  .schemaVersion == 1
+  .schemaVersion == 2
     and .architecture == "arm64"
+    and (.archiveSize > 0)
     and (.sha256 | test("^[0-9a-f]{64}$"))
     and (.downloadURL | startswith("https://github.com/soyukke/neovide-tabs/releases/download/"))
+    and (
+      .signature == null
+      or (
+        .signature.algorithm == "ed25519"
+        and (.signature.keyID | length > 0)
+        and (.signature.value | length > 0)
+      )
+    )
 ' "$manifest" >/dev/null
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$app_path"
 printf '%s\n%s\n' "$archive" "$manifest"

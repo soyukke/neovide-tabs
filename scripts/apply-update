@@ -1,0 +1,76 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 6 ]; then
+  echo "usage: apply-update CURRENT STAGED BACKUP TRASH PID MODE" >&2
+  exit 64
+fi
+
+current=$1
+staged=$2
+backup=$3
+trash=$4
+parent=$(/usr/bin/dirname "$current")
+pid=$5
+mode=$6
+
+case "$current" in
+  */Neovide\ Tabs.app) ;;
+  *) echo "refusing unexpected current application path: $current" >&2; exit 64 ;;
+esac
+case "$staged" in
+  "$parent"/.Neovide\ Tabs.update.*.app) ;;
+  *) echo "refusing unexpected staged application path: $staged" >&2; exit 64 ;;
+esac
+case "$backup" in
+  "$parent"/.Neovide\ Tabs.previous.*.app) ;;
+  *) echo "refusing unexpected backup application path: $backup" >&2; exit 64 ;;
+esac
+case "$trash" in
+  */.Trash/Neovide\ Tabs.previous.*.app) ;;
+  *) echo "refusing unexpected Trash path: $trash" >&2; exit 64 ;;
+esac
+case "$pid" in
+  '' | *[!0-9]*) echo "invalid application pid: $pid" >&2; exit 64 ;;
+esac
+case "$mode" in
+  launch | smoke) ;;
+  *) echo "invalid update mode: $mode" >&2; exit 64 ;;
+esac
+
+test -d "$current"
+test -d "$staged"
+test ! -e "$backup"
+test ! -e "$trash"
+
+attempt=0
+while /bin/kill -0 "$pid" 2>/dev/null; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 300 ]; then
+    echo "timed out waiting for application pid $pid" >&2
+    exit 75
+  fi
+  /bin/sleep 0.1
+done
+
+/bin/mv "$current" "$backup"
+if ! /bin/mv "$staged" "$current"; then
+  /bin/mv "$backup" "$current"
+  exit 74
+fi
+
+if ! /usr/bin/codesign --verify --deep --strict "$current"; then
+  /bin/mv "$current" "$staged"
+  /bin/mv "$backup" "$current"
+  exit 65
+fi
+
+if [ "$mode" = "launch" ] && ! /usr/bin/open -n "$current"; then
+  /bin/mv "$current" "$staged"
+  /bin/mv "$backup" "$current"
+  /usr/bin/open -n "$current" || true
+  exit 69
+fi
+
+# Keep the previous application recoverable instead of deleting it.
+/bin/mv "$backup" "$trash" || true

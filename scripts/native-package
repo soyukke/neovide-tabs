@@ -14,6 +14,8 @@ binary="$contents/MacOS/neovide-tabs"
 plist_template="spikes/macos-shell/Info.plist.in"
 entitlements="spikes/macos-shell/NeovideTabs.entitlements"
 icon_source="assets/app-icon.png"
+update_key_source="assets/update-signing-public-key.json"
+update_helper_source="scripts/apply-update"
 iconset="$package_root/AppIcon.iconset"
 identity="${APPLE_SIGNING_IDENTITY:--}"
 minimum_macos="14.0"
@@ -47,12 +49,16 @@ trap 'rm -f "$tmp_binary"' EXIT INT TERM
 env -u SDKROOT -u DEVELOPER_DIR \
   /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc \
   -O \
+  -parse-as-library \
+  -warnings-as-errors \
   -whole-module-optimization \
   -sdk "$sdk" \
   -target "$swift_target" \
   spikes/macos-shell/NativeShellSpike.swift \
+  spikes/macos-shell/UpdateInstaller.swift \
   target/release/libneovide_tabs.a \
   -framework AppKit \
+  -framework CryptoKit \
   -framework MetalKit \
   -framework Metal \
   -framework QuartzCore \
@@ -82,6 +88,9 @@ done <<'SIZES'
 SIZES
 /usr/bin/iconutil -c icns "$iconset" -o "$contents/Resources/AppIcon.icns"
 rm -rf -- "$iconset"
+/usr/bin/ditto "$update_key_source" "$contents/Resources/update-signing-public-key.json"
+/usr/bin/ditto "$update_helper_source" "$contents/Resources/apply-update"
+chmod 755 "$contents/Resources/apply-update"
 
 sed \
   -e "s/@VERSION@/$version/g" \
@@ -90,6 +99,13 @@ sed \
   "$plist_template" >"$contents/Info.plist"
 plutil -lint "$contents/Info.plist"
 test -s "$contents/Resources/AppIcon.icns"
+jq -e '
+  .schemaVersion == 1
+    and .algorithm == "ed25519"
+    and (.keyID | length > 0)
+    and (.publicKey | length > 0)
+' "$contents/Resources/update-signing-public-key.json" >/dev/null
+test -x "$contents/Resources/apply-update"
 actual_minimum="$(
   env -u SDKROOT -u DEVELOPER_DIR /usr/bin/vtool -show-build "$binary" |
     awk '/minos/ {print $2; exit}'
