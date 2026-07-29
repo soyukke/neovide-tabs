@@ -3,11 +3,13 @@ use std::{path::PathBuf, ptr};
 
 use serde::Serialize;
 
+use crate::control::{ControlResponse, ControlServer};
 use crate::core::{SplitAxis, TerminalCore};
 use crate::neovim_runtime::NativeNeovimRuntime;
 use crate::skia_metal::{NativeSkiaMetalRenderer, SkiaRenderGeometry};
 use crate::terminal_runtime::{
     NativeKeyInput, NativeMouseInput, NativeTerminalRuntime, TerminalGridSize, TerminalPoint,
+    TerminalSpawnConfig,
 };
 
 const NVTERM_SPLIT_VERTICAL: u32 = 0;
@@ -18,6 +20,14 @@ pub extern "C" fn nvterm_core_create() -> *mut TerminalCore {
     crate::logging::init();
     log::info!(target: "lifecycle", "core_created");
     Box::into_raw(Box::new(TerminalCore::new()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_core_create_with_theme(theme: *const c_char) -> *mut TerminalCore {
+    crate::logging::init();
+    let theme = c_string(theme).unwrap_or_else(|| "Graphite".to_owned());
+    log::info!(target: "lifecycle", "core_created theme={theme}");
+    Box::into_raw(Box::new(TerminalCore::new_with_theme(theme)))
 }
 
 #[unsafe(no_mangle)]
@@ -101,11 +111,92 @@ pub extern "C" fn nvterm_core_set_tab_theme(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn nvterm_core_set_default_theme(
+    handle: *mut TerminalCore,
+    theme: *const c_char,
+) -> u8 {
+    let Some(core) = core_mut(handle) else {
+        return 0;
+    };
+    let Some(theme) = c_string(theme) else {
+        return 0;
+    };
+    core.set_default_theme(theme);
+    1
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn nvterm_core_snapshot_json(handle: *const TerminalCore) -> *mut c_char {
     let Some(core) = core_ref(handle) else {
         return ptr::null_mut();
     };
     json_ptr(&core.snapshot())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_control_create(path: *const c_char) -> *mut ControlServer {
+    crate::logging::init();
+    let Some(path) = c_string(path) else {
+        return ptr::null_mut();
+    };
+    match ControlServer::start(path) {
+        Ok(server) => {
+            log::info!(
+                target: "control",
+                "server_started path={}",
+                server.socket_path().display()
+            );
+            Box::into_raw(Box::new(server))
+        }
+        Err(error) => {
+            log::error!(target: "control", "server_start_failed error={error:#}");
+            ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// `handle` must be null or a pointer returned by `nvterm_control_create`.
+pub unsafe extern "C" fn nvterm_control_destroy(handle: *mut ControlServer) {
+    if handle.is_null() {
+        return;
+    }
+    // SAFETY: `handle` was returned by `Box::into_raw` in `nvterm_control_create`.
+    unsafe {
+        drop(Box::from_raw(handle));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_control_wakeup_fd(handle: *const ControlServer) -> i32 {
+    control_ref(handle).map_or(-1, ControlServer::wakeup_fd)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_control_take_request_json(handle: *mut ControlServer) -> *mut c_char {
+    control_mut(handle)
+        .and_then(ControlServer::take_request)
+        .map_or(ptr::null_mut(), |request| json_ptr(&request))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_control_respond(
+    handle: *mut ControlServer,
+    id: u64,
+    response: *const c_char,
+) -> u8 {
+    let Some(server) = control_mut(handle) else {
+        return 0;
+    };
+    let Some(response) = c_string(response) else {
+        return 0;
+    };
+    let Ok(response) = serde_json::from_str::<ControlResponse>(&response) else {
+        return 0;
+    };
+    server.respond(id, response) as u8
 }
 
 #[unsafe(no_mangle)]
@@ -151,6 +242,37 @@ pub extern "C" fn nvterm_runtime_create_in_cwd(
         Ok(runtime) => Box::into_raw(Box::new(runtime)),
         Err(error) => {
             log::error!(target: "terminal", "spawn_in_cwd_failed error={error:#}");
+            ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_create_config(
+    rows: u16,
+    cols: u16,
+    pixel_width: u16,
+    pixel_height: u16,
+    config: *const c_char,
+) -> *mut NativeTerminalRuntime {
+    crate::logging::init();
+    let Some(config) = c_string(config) else {
+        return ptr::null_mut();
+    };
+    let Ok(config) = serde_json::from_str::<TerminalSpawnConfig>(&config) else {
+        log::error!(target: "terminal", "spawn_config_decode_failed");
+        return ptr::null_mut();
+    };
+    let size = TerminalGridSize {
+        rows,
+        cols,
+        pixel_width,
+        pixel_height,
+    };
+    match NativeTerminalRuntime::spawn_with_config(size, config) {
+        Ok(runtime) => Box::into_raw(Box::new(runtime)),
+        Err(error) => {
+            log::error!(target: "terminal", "spawn_config_failed error={error:#}");
             ptr::null_mut()
         }
     }
@@ -479,6 +601,26 @@ pub extern "C" fn nvterm_runtime_cwd(handle: *const NativeTerminalRuntime) -> *m
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_screen_text(handle: *mut NativeTerminalRuntime) -> *mut c_char {
+    let Some(runtime) = runtime_mut(handle) else {
+        return ptr::null_mut();
+    };
+    runtime.screen_text().map_or(ptr::null_mut(), string_ptr)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nvterm_runtime_kitty_placement_count(
+    handle: *const NativeTerminalRuntime,
+) -> usize {
+    let Some(runtime) = runtime_ref(handle) else {
+        return 0;
+    };
+    runtime
+        .kitty_placements()
+        .map_or(0, |placements| placements.len())
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn nvterm_nvim_create(
     rows: u16,
     cols: u16,
@@ -778,6 +920,19 @@ pub extern "C" fn nvterm_skia_metal_forget_runtime(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn nvterm_skia_metal_set_font_family(
+    renderer: *mut NativeSkiaMetalRenderer,
+    family: *const c_char,
+) -> u8 {
+    let Some(renderer) = skia_renderer_mut(renderer) else {
+        return 0;
+    };
+    let family = c_string(family);
+    renderer.set_font_family(family.as_deref());
+    1
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn nvterm_skia_metal_next_frame_delay_ms(
     renderer: *const NativeSkiaMetalRenderer,
 ) -> u64 {
@@ -817,6 +972,22 @@ fn core_ref<'a>(handle: *const TerminalCore) -> Option<&'a TerminalCore> {
 
     // SAFETY: Callers pass an opaque pointer created by `nvterm_core_create`.
     unsafe { handle.as_ref() }
+}
+
+fn control_mut<'a>(handle: *mut ControlServer) -> Option<&'a mut ControlServer> {
+    if handle.is_null() {
+        return None;
+    }
+    // SAFETY: Callers pass an exclusive opaque pointer created by `nvterm_control_create`.
+    Some(unsafe { &mut *handle })
+}
+
+fn control_ref<'a>(handle: *const ControlServer) -> Option<&'a ControlServer> {
+    if handle.is_null() {
+        return None;
+    }
+    // SAFETY: Callers pass an opaque pointer created by `nvterm_control_create`.
+    Some(unsafe { &*handle })
 }
 
 fn core_mut<'a>(handle: *mut TerminalCore) -> Option<&'a mut TerminalCore> {

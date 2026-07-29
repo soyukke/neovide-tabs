@@ -59,8 +59,12 @@ jobs:
           ' spikes/macos-shell/.build/release/latest.json
           nix develop --command just native-update-release-smoke
 
-      - name: Smoke-test packaged application
-        run: nix develop --command just native-package-smoke
+      - name: Smoke-test application surfaces
+        run: |
+          nix develop --command just native-settings-smoke
+          nix develop --command just native-control-smoke
+          nix develop --command just native-kitty-smoke
+          nix develop --command just native-package-smoke
 
       - name: Attest release provenance
         uses: actions/attest-build-provenance@v3

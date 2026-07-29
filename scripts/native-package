@@ -11,6 +11,7 @@ package_root="spikes/macos-shell/.build/package"
 app_path="$package_root/Neovide Tabs.app"
 contents="$app_path/Contents"
 binary="$contents/MacOS/neovide-tabs"
+control_binary="$contents/MacOS/nvtermctl"
 plist_template="spikes/macos-shell/Info.plist.in"
 entitlements="spikes/macos-shell/NeovideTabs.entitlements"
 icon_source="assets/app-icon.png"
@@ -41,7 +42,7 @@ esac
 rm -rf -- "$app_path"
 mkdir -p "$contents/MacOS" "$contents/Resources"
 
-MACOSX_DEPLOYMENT_TARGET="$minimum_macos" cargo build --release --lib
+MACOSX_DEPLOYMENT_TARGET="$minimum_macos" cargo build --release --lib --bin nvtermctl
 sdk="$(env -u SDKROOT -u DEVELOPER_DIR /usr/bin/xcrun --sdk macosx --show-sdk-path)"
 tmp_binary="$package_root/neovide-tabs.$$"
 trap 'rm -f "$tmp_binary"' EXIT INT TERM
@@ -54,6 +55,8 @@ env -u SDKROOT -u DEVELOPER_DIR \
   -whole-module-optimization \
   -sdk "$sdk" \
   -target "$swift_target" \
+  spikes/macos-shell/ControlHost.swift \
+  spikes/macos-shell/SettingsWindow.swift \
   spikes/macos-shell/NativeShellSpike.swift \
   spikes/macos-shell/UpdateInstaller.swift \
   target/release/libneovide_tabs.a \
@@ -65,6 +68,8 @@ env -u SDKROOT -u DEVELOPER_DIR \
   -lc++ \
   -o "$tmp_binary"
 mv -f "$tmp_binary" "$binary"
+/usr/bin/ditto target/release/nvtermctl "$control_binary"
+chmod 755 "$control_binary"
 
 rm -rf -- "$iconset"
 mkdir -p "$iconset"
@@ -106,14 +111,30 @@ jq -e '
     and (.publicKey | length > 0)
 ' "$contents/Resources/update-signing-public-key.json" >/dev/null
 test -x "$contents/Resources/apply-update"
+test -x "$control_binary"
+if [[ "$(lipo -archs "$control_binary")" != "arm64" ]]; then
+  echo "nvtermctl is not an exact arm64 binary" >&2
+  exit 65
+fi
 actual_minimum="$(
   env -u SDKROOT -u DEVELOPER_DIR /usr/bin/vtool -show-build "$binary" |
     awk '/minos/ {print $2; exit}'
 )"
-if [[ "$actual_minimum" != "$minimum_macos" ]]; then
-  echo "unexpected binary minimum macOS: $actual_minimum (expected $minimum_macos)" >&2
+control_minimum="$(
+  env -u SDKROOT -u DEVELOPER_DIR /usr/bin/vtool -show-build "$control_binary" |
+    awk '/minos/ {print $2; exit}'
+)"
+if [[ "$actual_minimum" != "$minimum_macos" || "$control_minimum" != "$minimum_macos" ]]; then
+  echo "unexpected minimum macOS: app=$actual_minimum cli=$control_minimum (expected $minimum_macos)" >&2
   exit 65
 fi
+
+/usr/bin/codesign \
+  --force \
+  --sign "$identity" \
+  --options runtime \
+  "$timestamp_option" \
+  "$control_binary"
 
 /usr/bin/codesign \
   --force \

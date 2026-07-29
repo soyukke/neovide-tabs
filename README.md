@@ -42,6 +42,9 @@ just native-release # build a ZIP plus checksummed update manifest
 just native-update-test # test version ordering and GitHub update metadata
 just native-update-install-smoke # test atomic replacement and rollback paths
 just native-update-release-smoke # verify a signed ZIP with the embedded key
+just native-settings-smoke # capture and verify every native Settings tab
+just native-control-smoke # exercise nvtermctl and its owner-only socket
+just native-kitty-smoke # verify Kitty transfer, isolation, deletion, and pixels
 just native-notarize # Developer ID sign, notarize, staple, and assess the .app
 just native-smoke # launch the native host briefly and write a PNG smoke shot
 just native-package-smoke # visually verify the exact Release .app executable
@@ -116,8 +119,8 @@ Pushing a tag that exactly matches the Cargo package version publishes a GitHub
 Release after the full verification and packaged-application smoke gates pass:
 
 ```sh
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 The tag workflow runs on GitHub's Apple Silicon runner, attaches the arm64 ZIP
@@ -182,6 +185,13 @@ events use macOS unified logging.
   native Neovim replacement.
 - Stores font size, Option-as-Alt, bell attention, session-restore preferences,
   and versioned recursive tab/pane session metadata in macOS `UserDefaults`.
+- Provides a native Settings window for general behavior, font and theme,
+  shell and startup directory, conflict-checked keybindings, and signed-update
+  frequency. Live-safe settings apply immediately; shell and directory changes
+  apply to newly created panes.
+- Bundles `nvtermctl`, a versioned local control CLI for reading visible pane
+  text, sending input and keys, creating and naming tabs/splits, changing
+  themes, and coordinating agent status.
 - Uses runtime wakeup descriptors and renderer animation deadlines instead of
   permanent 60 Hz polling, and tears down PTY process groups and reader threads
   when panes close.
@@ -198,6 +208,47 @@ events use macOS unified logging.
 - Decodes Kitty graphics through `libghostty-vt` and composites visible image
   placements in Skia/Metal with pane clipping and z-order. RGBA and Skia image
   objects are cached by image generation and released with their pane runtime.
+  Direct data, owner-scoped Kitty temporary files, and shared memory are
+  supported; arbitrary regular-file reads remain disabled.
+
+## Settings
+
+Open Neovide Tabs → Settings… or press `Command-,`.
+
+- General controls Option-as-Alt, bell attention, and session restore.
+- Appearance selects a fixed-pitch font, font size, and the default theme for
+  new tabs.
+- Terminal selects an executable absolute shell path and an existing startup
+  directory for new panes. Empty values use the login shell and inherit the
+  active working directory.
+- Keybindings customizes session, pane, Neovim, zoom, and update commands.
+  Invalid, duplicate, and standard app-reserved shortcuts are rejected.
+- Updates enables signed checks and selects every-launch, daily, or weekly
+  frequency.
+
+Invalid stored paths, removed fonts, or corrupt keybindings are repaired to
+safe defaults during load so preferences cannot prevent startup.
+
+## Local control API
+
+Every pane receives `NVTERM_SOCKET`, `NVTERM_TAB_ID`, `NVTERM_PANE_ID`, and
+`NVTERMCTL`, and can invoke:
+
+```sh
+"$NVTERMCTL" list
+"$NVTERMCTL" read-screen
+"$NVTERMCTL" split --vertical
+"$NVTERMCTL" status set running "working"
+"$NVTERMCTL" status wait --timeout 300
+```
+
+The app bundle also contains `Contents/MacOS/nvtermctl` for external scripts.
+Its directory is prepended to the pane's initial `PATH`; use `$NVTERMCTL` when
+a shell startup file replaces `PATH`.
+The Unix socket is owner-only, verifies the peer UID, and has bounded request,
+client, and timeout limits; it is not a remote-control interface. See
+[`docs/nvtermctl.md`](docs/nvtermctl.md) for commands, JSON behavior, and the
+security boundary.
 
 ## Native Shortcuts
 

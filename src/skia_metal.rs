@@ -188,6 +188,10 @@ mod platform {
             self.next_frame_delay_ms().is_some()
         }
 
+        pub fn set_font_family(&mut self, family: Option<&str>) {
+            self.text_renderer.set_primary_font_family(family);
+        }
+
         pub fn forget_runtime(&mut self, runtime_id: usize) {
             self.runtime_states.remove(&runtime_id);
             self.kitty_images
@@ -299,6 +303,7 @@ mod platform {
             options.kitty_placements,
             &mut *options.kitty_images,
             options.runtime_id,
+            model,
             geometry,
             |z| z < 0,
         );
@@ -310,6 +315,7 @@ mod platform {
             options.kitty_placements,
             &mut *options.kitty_images,
             options.runtime_id,
+            model,
             geometry,
             |z| z >= 0,
         );
@@ -323,6 +329,7 @@ mod platform {
         placements: &[KittyImagePlacementSnapshot],
         image_cache: &mut HashMap<(usize, u32), CachedKittyImage>,
         runtime_id: usize,
+        model: &NeovideRendererModelSnapshot,
         geometry: SkiaRenderGeometry,
         layer: impl Fn(i32) -> bool,
     ) {
@@ -378,7 +385,7 @@ mod platform {
                     + placement.viewport_col as f32 * geometry.cell_width
                     + placement.x_offset as f32,
                 geometry.origin_y
-                    + placement.viewport_row as f32 * geometry.cell_height
+                    + animated_kitty_row(model, placement.viewport_row) * geometry.cell_height
                     + placement.y_offset as f32,
                 placement.pixel_width as f32,
                 placement.pixel_height as f32,
@@ -390,6 +397,22 @@ mod platform {
                 destination,
                 &paint,
             );
+        }
+    }
+
+    fn animated_kitty_row(model: &NeovideRendererModelSnapshot, viewport_row: i32) -> f32 {
+        let row = viewport_row as f32;
+        let Some(window) = model.windows.iter().find(|window| {
+            window.grid_id == 1
+                && window.window_kind == crate::neovide_render::NeovideWindowKind::Normal
+        }) else {
+            return row;
+        };
+        let inner = window.inner_row_range();
+        if viewport_row < i32::try_from(inner.end).unwrap_or(i32::MAX) {
+            row - window.scroll_position
+        } else {
+            row
         }
     }
 
@@ -966,6 +989,31 @@ mod platform {
             assert!(blink.should_render());
         }
 
+        #[test]
+        fn kitty_row_uses_the_same_scroll_animation_as_terminal_text() {
+            let mut model = NeovideRendererModelSnapshot {
+                schema_version: 1,
+                background: TerminalColor { r: 0, g: 0, b: 0 },
+                cursor_color: TerminalColor { r: 0, g: 0, b: 0 },
+                cursor: None,
+                scrollbar: None,
+                scroll_hint: None,
+                windows: vec![
+                    crate::neovide_render::NeovideRenderedWindowCache::new(8, 6).snapshot(
+                        1,
+                        crate::neovide_render::NeovideRenderedWindowPlacement::main(8, 6),
+                    ),
+                ],
+            };
+            model.windows[0].scroll_position = -2.0;
+
+            assert_eq!(animated_kitty_row(&model, 3), 5.0);
+            model.windows[0].scroll_position = -1.0;
+            assert_eq!(animated_kitty_row(&model, 3), 4.0);
+            model.windows[0].scroll_position = 0.0;
+            assert_eq!(animated_kitty_row(&model, 3), 3.0);
+        }
+
         fn cursor(
             x: u16,
             y: u16,
@@ -1024,6 +1072,8 @@ mod platform {
         pub fn needs_animation_frame(&self) -> bool {
             false
         }
+
+        pub fn set_font_family(&mut self, _family: Option<&str>) {}
 
         pub fn forget_runtime(&mut self, _runtime_id: usize) {}
 

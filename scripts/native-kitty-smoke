@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+  exec nix develop --command ./scripts/native-kitty-smoke "$@"
+fi
+
+app="${NVTERM_NATIVE_EXECUTABLE:-spikes/macos-shell/.build/NativeShellSpike}"
+cli="${NVTERM_CONTROL_EXECUTABLE:-target/debug/nvtermctl}"
+cli="$(cd "$(dirname "$cli")" && pwd)/$(basename "$cli")"
+smoke_root="$(mktemp -d "${TMPDIR:-/tmp}/neovide-tabs-kitty-smoke.XXXXXX")"
+socket="$smoke_root/control.sock"
+window_id_file="$smoke_root/window-id"
+shot="spikes/macos-shell/.build/native-kitty-smoke.png"
+rm -f "$shot"
+
+NVTERM_CONTROL_SOCKET="$socket" \
+  NVTERM_NATIVE_SMOKE_SCENARIO=kitty \
+  NVTERM_NATIVE_SMOKE_WINDOW_ID="$window_id_file" \
+  "$app" >"$smoke_root/app.log" 2>&1 &
+app_pid=$!
+
+# shellcheck disable=SC2329
+cleanup() {
+  if kill -0 "$app_pid" 2>/dev/null; then
+    kill "$app_pid" 2>/dev/null || true
+    wait "$app_pid" 2>/dev/null || true
+  fi
+  rm -rf -- "$smoke_root"
+}
+trap cleanup EXIT INT TERM
+
+for _ in {1..100}; do
+  if [[ -S "$socket" && -s "$window_id_file" ]] && kill -0 "$app_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+if [[ ! -S "$socket" || ! -s "$window_id_file" ]]; then
+  cat "$smoke_root/app.log" >&2
+  echo "kitty smoke failed: application did not become ready" >&2
+  exit 1
+fi
+
+send_image() {
+  local pane="$1"
+  local image_id="$2"
+  local image_path="$3"
+  local encoded_path
+  local emit_command
+  encoded_path="$(printf '%s' "$image_path" | /usr/bin/base64 | tr -d '\r\n')"
+  emit_command="printf '\\033_Ga=T,f=100,t=t,i=${image_id},c=12,r=8,q=2;${encoded_path}\\033\\\\'"
+  "$cli" --socket "$socket" send --pane "$pane" "$emit_command" >/dev/null
+  "$cli" --socket "$socket" key --pane "$pane" Enter >/dev/null
+}
+
+first_image="$smoke_root/tty-graphics-protocol-neovide-tabs-first.png"
+second_image="$smoke_root/tty-graphics-protocol-neovide-tabs-second.png"
+/usr/bin/ditto assets/app-icon.png "$first_image"
+/usr/bin/ditto assets/app-icon.png "$second_image"
+split="$("$cli" --socket "$socket" --json split --pane 1 --vertical --cwd "$smoke_root")"
+second_pane="$(jq -r '.result.pane' <<<"$split")"
+send_image 1 900 "$first_image"
+send_image "$second_pane" 901 "$second_image"
+
+for _ in {1..100}; do
+  state="$("$cli" --socket "$socket" --json list)"
+  if jq -e --argjson second "$second_pane" '
+    any(.result.panes[]; .id == 1 and .kittyImages == 1)
+      and any(.result.panes[]; .id == $second and .kittyImages == 1)
+  ' <<<"$state" >/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e --argjson second "$second_pane" '
+  any(.result.panes[]; .id == 1 and .kittyImages == 1)
+    and any(.result.panes[]; .id == $second and .kittyImages == 1)
+' <<<"$state" >/dev/null
+test ! -e "$first_image"
+test ! -e "$second_image"
+
+delete_command="printf '\\033_Ga=d,d=I,i=900,q=2\\033\\\\'"
+"$cli" --socket "$socket" send --pane 1 "$delete_command" >/dev/null
+"$cli" --socket "$socket" key --pane 1 Enter >/dev/null
+for _ in {1..100}; do
+  state="$("$cli" --socket "$socket" --json list)"
+  if jq -e --argjson second "$second_pane" '
+    any(.result.panes[]; .id == 1 and .kittyImages == 0)
+      and any(.result.panes[]; .id == $second and .kittyImages == 1)
+  ' <<<"$state" >/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e --argjson second "$second_pane" '
+  any(.result.panes[]; .id == 1 and .kittyImages == 0)
+    and any(.result.panes[]; .id == $second and .kittyImages == 1)
+' <<<"$state" >/dev/null || {
+  "$cli" --socket "$socket" --json read-screen --pane 1 >&2 || true
+  jq . <<<"$state" >&2
+  echo "kitty smoke failed: deleting image 900 did not update pane 1" >&2
+  exit 1
+}
+
+replacement="$smoke_root/tty-graphics-protocol-neovide-tabs-replacement.png"
+/usr/bin/ditto assets/app-icon.png "$replacement"
+send_image 1 902 "$replacement"
+for _ in {1..100}; do
+  state="$("$cli" --socket "$socket" --json list)"
+  if jq -e 'any(.result.panes[]; .id == 1 and .kittyImages == 1)' \
+    <<<"$state" >/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e 'any(.result.panes[]; .id == 1 and .kittyImages == 1)' \
+  <<<"$state" >/dev/null
+
+# This is intentionally expanded by the shell inside the tested terminal pane.
+# shellcheck disable=SC2016
+scroll_command='i=0; while [ "$i" -lt 80 ]; do printf "kitty-scroll-%s\n" "$i"; i=$((i + 1)); done'
+"$cli" --socket "$socket" send --pane 1 "$scroll_command" >/dev/null
+"$cli" --socket "$socket" key --pane 1 Enter >/dev/null
+for _ in {1..100}; do
+  state="$("$cli" --socket "$socket" --json list)"
+  if jq -e --argjson second "$second_pane" '
+    any(.result.panes[]; .id == 1 and .kittyImages == 0)
+      and any(.result.panes[]; .id == $second and .kittyImages == 1)
+  ' <<<"$state" >/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e --argjson second "$second_pane" '
+  any(.result.panes[]; .id == 1 and .kittyImages == 0)
+    and any(.result.panes[]; .id == $second and .kittyImages == 1)
+' <<<"$state" >/dev/null
+
+final_image="$smoke_root/tty-graphics-protocol-neovide-tabs-final.png"
+/usr/bin/ditto assets/app-icon.png "$final_image"
+"$cli" --socket "$socket" send --pane 1 clear >/dev/null
+"$cli" --socket "$socket" key --pane 1 Enter >/dev/null
+sleep 0.1
+send_image 1 903 "$final_image"
+for _ in {1..100}; do
+  state="$("$cli" --socket "$socket" --json list)"
+  if jq -e 'any(.result.panes[]; .id == 1 and .kittyImages == 1)' \
+    <<<"$state" >/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e 'any(.result.panes[]; .id == 1 and .kittyImages == 1)' \
+  <<<"$state" >/dev/null
+sleep 0.5
+
+window_id="$(tr -d '[:space:]' <"$window_id_file")"
+for _ in {1..40}; do
+  if ./scripts/native-window-capture "$window_id" "$shot" && [[ -s "$shot" ]]; then
+    if ./scripts/native-smoke-verify "$shot" kitty; then
+      echo "native kitty smoke passed"
+      exit 0
+    fi
+  fi
+  sleep 0.15
+done
+
+echo "kitty smoke failed: image was not visible in the rendered application" >&2
+exit 1

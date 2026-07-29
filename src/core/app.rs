@@ -10,18 +10,12 @@ pub struct TerminalCore {
     active_tab: usize,
     next_tab_id: usize,
     next_pane_id: usize,
+    default_theme: String,
 }
 
 impl Default for TerminalCore {
     fn default() -> Self {
-        let mut core = Self {
-            tabs: Vec::new(),
-            active_tab: 0,
-            next_tab_id: 1,
-            next_pane_id: 1,
-        };
-        core.new_tab();
-        core
+        Self::new_with_theme(DEFAULT_THEME_NAME)
     }
 }
 
@@ -30,14 +24,24 @@ impl TerminalCore {
         Self::default()
     }
 
+    pub fn new_with_theme(theme: impl Into<String>) -> Self {
+        let default_theme = normalized_theme(theme.into());
+        let mut core = Self {
+            tabs: Vec::new(),
+            active_tab: 0,
+            next_tab_id: 1,
+            next_pane_id: 1,
+            default_theme,
+        };
+        core.new_tab();
+        core
+    }
+
     pub fn new_tab(&mut self) -> usize {
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
         let pane_id = self.alloc_pane_id();
-        let theme = self
-            .active_tab()
-            .map(|tab| tab.theme.clone())
-            .unwrap_or_else(|| DEFAULT_THEME_NAME.to_owned());
+        let theme = self.default_theme.clone();
         self.tabs.push(TerminalCoreTab::new(tab_id, pane_id, theme));
         self.active_tab = self.tabs.len() - 1;
         self.active_tab
@@ -98,8 +102,24 @@ impl TerminalCore {
         let Some(tab) = self.tabs.get_mut(index) else {
             return false;
         };
-        tab.theme = theme.into();
+        tab.theme = normalized_theme(theme.into());
         true
+    }
+
+    pub fn set_default_theme(&mut self, theme: impl Into<String>) {
+        self.default_theme = normalized_theme(theme.into());
+    }
+
+    pub fn tab_index_for_id(&self, tab_id: usize) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.id == tab_id)
+    }
+
+    pub fn tab_id_for_pane(&self, pane_id: usize) -> Option<usize> {
+        let pane_id = PaneId(pane_id);
+        self.tabs
+            .iter()
+            .find(|tab| tab.contains_pane(pane_id))
+            .map(|tab| tab.id)
     }
 
     pub fn snapshot(&self) -> TerminalCoreSnapshot {
@@ -112,10 +132,6 @@ impl TerminalCore {
                 .map(|(index, tab)| tab.snapshot(index))
                 .collect(),
         }
-    }
-
-    fn active_tab(&self) -> Option<&TerminalCoreTab> {
-        self.tabs.get(self.active_tab)
     }
 
     fn active_tab_mut(&mut self) -> Option<&mut TerminalCoreTab> {
@@ -141,6 +157,7 @@ impl TerminalCore {
 
 #[derive(Clone, Debug, PartialEq)]
 struct TerminalCoreTab {
+    id: usize,
     title: String,
     active_pane: PaneId,
     theme: String,
@@ -151,6 +168,7 @@ struct TerminalCoreTab {
 impl TerminalCoreTab {
     fn new(tab_id: usize, pane_id: PaneId, theme: String) -> Self {
         Self {
+            id: tab_id,
             title: format!("session {tab_id}"),
             active_pane: pane_id,
             theme,
@@ -191,6 +209,7 @@ impl TerminalCoreTab {
 
     fn snapshot(&self, index: usize) -> TerminalCoreTabSnapshot {
         TerminalCoreTabSnapshot {
+            id: self.id,
             index,
             title: self.title.clone(),
             active_pane: self.active_pane.0,
@@ -209,12 +228,22 @@ pub struct TerminalCoreSnapshot {
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct TerminalCoreTabSnapshot {
+    pub id: usize,
     pub index: usize,
     pub title: String,
     pub active_pane: usize,
     pub theme: String,
     pub panes: Vec<usize>,
     pub layout: PaneLayoutSnapshot,
+}
+
+fn normalized_theme(theme: String) -> String {
+    let theme = theme.trim();
+    if theme.is_empty() {
+        DEFAULT_THEME_NAME.to_owned()
+    } else {
+        theme.to_owned()
+    }
 }
 
 #[cfg(test)]
@@ -226,8 +255,34 @@ mod tests {
         let snapshot = TerminalCore::new().snapshot();
 
         assert_eq!(snapshot.active_tab, 0);
+        assert_eq!(snapshot.tabs[0].id, 1);
         assert_eq!(snapshot.tabs[0].title, "session 1");
         assert_eq!(snapshot.tabs[0].active_pane, 1);
+    }
+
+    #[test]
+    fn configured_default_theme_applies_to_new_tabs() {
+        let mut core = TerminalCore::new_with_theme("Harbor");
+        assert_eq!(core.snapshot().tabs[0].theme, "Harbor");
+
+        core.set_tab_theme(0, "Rose");
+        core.new_tab();
+        assert_eq!(core.snapshot().tabs[1].theme, "Harbor");
+
+        core.set_default_theme("Paper");
+        core.new_tab();
+        assert_eq!(core.snapshot().tabs[2].theme, "Paper");
+    }
+
+    #[test]
+    fn stable_tab_ids_resolve_panes() {
+        let mut core = TerminalCore::new();
+        assert_eq!(core.new_tab(), 1);
+        assert_eq!(core.split_active(SplitAxis::Vertical), Some(3));
+
+        assert_eq!(core.tab_index_for_id(2), Some(1));
+        assert_eq!(core.tab_id_for_pane(3), Some(2));
+        assert_eq!(core.tab_id_for_pane(99), None);
     }
 
     #[test]

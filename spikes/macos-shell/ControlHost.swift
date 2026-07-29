@@ -1,0 +1,214 @@
+import Foundation
+
+@_silgen_name("nvterm_control_create")
+private func nvterm_control_create(
+    _ path: UnsafePointer<CChar>?
+) -> UnsafeMutableRawPointer?
+
+@_silgen_name("nvterm_control_destroy")
+private func nvterm_control_destroy(_ handle: UnsafeMutableRawPointer?)
+
+@_silgen_name("nvterm_control_wakeup_fd")
+private func nvterm_control_wakeup_fd(_ handle: UnsafeMutableRawPointer?) -> Int32
+
+@_silgen_name("nvterm_control_take_request_json")
+private func nvterm_control_take_request_json(
+    _ handle: UnsafeMutableRawPointer?
+) -> UnsafeMutablePointer<CChar>?
+
+@_silgen_name("nvterm_control_respond")
+private func nvterm_control_respond(
+    _ handle: UnsafeMutableRawPointer?,
+    _ id: UInt64,
+    _ response: UnsafePointer<CChar>?
+) -> UInt8
+
+struct NativeControlRequest: Decodable {
+    let id: UInt64
+    let version: UInt32
+    let command: String
+    let pane: Int?
+    let tab: Int?
+    let text: String?
+    let key: String?
+    let status: String?
+    let summary: String?
+    let timeout_ms: UInt64?
+    let cwd: String?
+    let axis: String?
+    let title: String?
+    let theme: String?
+}
+
+private struct NativeControlEnvelope: Decodable {
+    let id: UInt64
+}
+
+struct NativeControlFailure: Error {
+    let code: String
+    let message: String
+}
+
+typealias NativeControlReply = (Result<Any, NativeControlFailure>) -> Void
+
+final class NativeControlServer {
+    var onRequest: ((NativeControlRequest, @escaping NativeControlReply) -> Void)?
+
+    let socketPath: String
+    private let handle: UnsafeMutableRawPointer
+    private var wakeupSource: DispatchSourceRead?
+
+    init?(socketPath: String) {
+        let handle = socketPath.withCString { path in
+            nvterm_control_create(path)
+        }
+        guard let handle else {
+            return nil
+        }
+        let descriptor = nvterm_control_wakeup_fd(handle)
+        guard descriptor >= 0 else {
+            nvterm_control_destroy(handle)
+            return nil
+        }
+        self.socketPath = socketPath
+        self.handle = handle
+        let source = DispatchSource.makeReadSource(
+            fileDescriptor: descriptor,
+            queue: .main
+        )
+        self.wakeupSource = source
+        source.setEventHandler { [weak self] in
+            self?.drain()
+        }
+        source.resume()
+    }
+
+    deinit {
+        wakeupSource?.cancel()
+        nvterm_control_destroy(handle)
+    }
+
+    private func drain() {
+        while let pointer = nvterm_control_take_request_json(handle) {
+            let json = String(cString: pointer)
+            nvterm_string_free(pointer)
+            guard let data = json.data(using: .utf8) else {
+                continue
+            }
+            guard let request = try? JSONDecoder().decode(
+                NativeControlRequest.self,
+                from: data
+            ) else {
+                if let envelope = try? JSONDecoder().decode(
+                    NativeControlEnvelope.self,
+                    from: data
+                ) {
+                    respond(
+                        id: envelope.id,
+                        result: .failure(
+                            NativeControlFailure(
+                                code: "invalid_request",
+                                message: "The control request contains invalid values."
+                            )
+                        )
+                    )
+                }
+                continue
+            }
+            guard request.version == 1 else {
+                respond(
+                    id: request.id,
+                    result: .failure(
+                        NativeControlFailure(
+                            code: "unsupported_version",
+                            message: "Unsupported control protocol version."
+                        )
+                    )
+                )
+                continue
+            }
+            guard let onRequest else {
+                respond(
+                    id: request.id,
+                    result: .failure(
+                        NativeControlFailure(
+                            code: "host_unavailable",
+                            message: "The application command router is unavailable."
+                        )
+                    )
+                )
+                continue
+            }
+            onRequest(request) { [weak self] result in
+                self?.respond(id: request.id, result: result)
+            }
+        }
+    }
+
+    private func respond(
+        id: UInt64,
+        result: Result<Any, NativeControlFailure>
+    ) {
+        let object: [String: Any]
+        switch result {
+        case let .success(value):
+            object = ["ok": true, "result": value]
+        case let .failure(error):
+            object = [
+                "ok": false,
+                "error": ["code": error.code, "message": error.message],
+            ]
+        }
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object),
+              let json = String(data: data, encoding: .utf8)
+        else {
+            return
+        }
+        json.withCString { value in
+            _ = nvterm_control_respond(handle, id, value)
+        }
+    }
+}
+
+enum NativeControlEnvironment {
+    static func socketPath() -> String {
+        if let override = ProcessInfo.processInfo.environment["NVTERM_CONTROL_SOCKET"],
+           !override.isEmpty {
+            return override
+        }
+        if ProcessInfo.processInfo.environment["NVTERM_NATIVE_SMOKE_SCENARIO"] != nil {
+            return FileManager.default.temporaryDirectory
+                .appendingPathComponent(
+                    "neovide-tabs-smoke-\(ProcessInfo.processInfo.processIdentifier)",
+                    isDirectory: true
+                )
+                .appendingPathComponent("control.sock")
+                .path
+        }
+        let base = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.homeDirectoryForCurrentUser
+        return base
+            .appendingPathComponent("Neovide Tabs", isDirectory: true)
+            .appendingPathComponent("run", isDirectory: true)
+            .appendingPathComponent("control.sock")
+            .path
+    }
+
+    static func cliPath() -> String {
+        let bundled = Bundle.main.executableURL?
+            .deletingLastPathComponent()
+            .appendingPathComponent("nvtermctl")
+        if let bundled, FileManager.default.isExecutableFile(atPath: bundled.path) {
+            return bundled.path
+        }
+        return URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath,
+            isDirectory: true
+        )
+        .appendingPathComponent("target/debug/nvtermctl")
+        .path
+    }
+}

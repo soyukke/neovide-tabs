@@ -8,13 +8,21 @@ fi
 ./scripts/native-package
 app_path="spikes/macos-shell/.build/package/Neovide Tabs.app"
 executable="$app_path/Contents/MacOS/neovide-tabs"
+control_executable="$app_path/Contents/MacOS/nvtermctl"
 
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$app_path"
+/usr/bin/codesign --verify --strict --verbose=2 "$control_executable"
 test -s "$app_path/Contents/Resources/AppIcon.icns"
 test -s "$app_path/Contents/Resources/update-signing-public-key.json"
 test -x "$app_path/Contents/Resources/apply-update"
+test -x "$control_executable"
+test "$(/usr/bin/lipo -archs "$control_executable")" = "arm64"
 test "$(
   env -u SDKROOT -u DEVELOPER_DIR /usr/bin/vtool -show-build "$executable" |
+    awk '/minos/ {print $2; exit}'
+)" = "14.0"
+test "$(
+  env -u SDKROOT -u DEVELOPER_DIR /usr/bin/vtool -show-build "$control_executable" |
     awk '/minos/ {print $2; exit}'
 )" = "14.0"
 
