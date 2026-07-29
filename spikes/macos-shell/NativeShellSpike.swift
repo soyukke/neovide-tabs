@@ -174,8 +174,6 @@ enum AppUpdateError: LocalizedError {
     case invalidEndpoint
     case invalidResponse
     case invalidRelease
-    case missingArm64Asset
-    case missingManifestAsset
     case responseTooLarge
     case serverStatus(Int)
 
@@ -186,13 +184,9 @@ enum AppUpdateError: LocalizedError {
         case .invalidEndpoint:
             return "The update service URL is invalid."
         case .invalidResponse:
-            return "GitHub returned an invalid update response."
+            return "GitHub returned invalid signed update metadata."
         case .invalidRelease:
-            return "The latest GitHub Release has invalid version metadata."
-        case .missingArm64Asset:
-            return "The latest GitHub Release does not contain an Apple Silicon download."
-        case .missingManifestAsset:
-            return "The latest GitHub Release does not contain an update manifest."
+            return "The latest update manifest has invalid release metadata."
         case .responseTooLarge:
             return "The update response exceeded the allowed size."
         case let .serverStatus(status):
@@ -202,37 +196,14 @@ enum AppUpdateError: LocalizedError {
 }
 
 final class AppUpdateChecker {
-    private struct GitHubRelease: Decodable {
-        struct Asset: Decodable {
-            let name: String
-            let size: Int64
-            let downloadURL: URL
-
-            enum CodingKeys: String, CodingKey {
-                case name
-                case size
-                case downloadURL = "browser_download_url"
-            }
-        }
-
-        let tagName: String
-        let releaseNotesURL: URL
-        let assets: [Asset]
-
-        enum CodingKeys: String, CodingKey {
-            case tagName = "tag_name"
-            case releaseNotesURL = "html_url"
-            case assets
-        }
-    }
-
-    private static let maximumResponseBytes = 1_048_576
+    private static let repositoryPath = "/soyukke/neovide-tabs"
+    private static let maximumResponseBytes = 65_536
     private let endpoint: URL
     private let session: URLSession
 
     init(
         endpoint: URL? = URL(
-            string: "https://api.github.com/repos/soyukke/neovide-tabs/releases/latest"
+            string: "https://github.com/soyukke/neovide-tabs/releases/latest/download/latest.json"
         ),
         session: URLSession = .shared
     ) {
@@ -245,7 +216,12 @@ final class AppUpdateChecker {
         currentVersion: String,
         completion: @escaping (Result<AppUpdateResult, Error>) -> Void
     ) -> URLSessionDataTask? {
-        guard endpoint.scheme == "https", endpoint.host == "api.github.com" else {
+        guard endpoint.scheme == "https",
+              endpoint.host == "github.com",
+              endpoint.path == Self.repositoryPath + "/releases/latest/download/latest.json",
+              endpoint.query == nil,
+              endpoint.fragment == nil
+        else {
             completion(.failure(AppUpdateError.invalidEndpoint))
             return nil
         }
@@ -255,8 +231,7 @@ final class AppUpdateChecker {
             cachePolicy: .reloadRevalidatingCacheData,
             timeoutInterval: 15
         )
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Neovide-Tabs/\(currentVersion)", forHTTPHeaderField: "User-Agent")
 
         let task = session.dataTask(with: request) { data, response, error in
@@ -269,7 +244,9 @@ final class AppUpdateChecker {
                 return
             }
             guard response.url?.scheme == "https",
-                  response.url?.host == "api.github.com"
+                  let responseHost = response.url?.host,
+                  responseHost == "github.com"
+                    || responseHost == "release-assets.githubusercontent.com"
             else {
                 completion(.failure(AppUpdateError.invalidResponse))
                 return
@@ -301,60 +278,64 @@ final class AppUpdateChecker {
         guard let current = AppSemanticVersion(currentVersion) else {
             throw AppUpdateError.invalidCurrentVersion
         }
-        let release: GitHubRelease
+        let manifest: UpdateManifest
         do {
-            release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+            manifest = try JSONDecoder().decode(UpdateManifest.self, from: data)
         } catch {
             throw AppUpdateError.invalidResponse
         }
-        guard let latest = AppSemanticVersion(release.tagName),
-              release.releaseNotesURL.scheme == "https",
-              release.releaseNotesURL.host == "github.com",
-              release.releaseNotesURL.path.hasPrefix(
-                  "/soyukke/neovide-tabs/releases/tag/"
-              )
+        guard let latest = AppSemanticVersion(manifest.version)
+        else {
+            throw AppUpdateError.invalidRelease
+        }
+        let version = manifest.version
+        let tagName = "v\(version)"
+        let expectedAssetName = "Neovide-Tabs-\(version)-macOS-arm64.zip"
+        let expectedAssetPath = Self.repositoryPath
+            + "/releases/download/\(tagName)/\(expectedAssetName)"
+        guard let expectedDownloadURL = URL(
+            string: "https://github.com\(expectedAssetPath)"
+        ),
+            let manifestURL = URL(
+                string: "https://github.com\(Self.repositoryPath)"
+                    + "/releases/download/\(tagName)/latest.json"
+            ),
+            let releaseNotesURL = URL(
+                string: "https://github.com\(Self.repositoryPath)"
+                    + "/releases/tag/\(tagName)"
+            )
+        else {
+            throw AppUpdateError.invalidRelease
+        }
+        guard manifest.schemaVersion == 2,
+              !manifest.build.isEmpty,
+              manifest.channel == "development" || manifest.channel == "production",
+              manifest.architecture == "arm64",
+              manifest.archive == expectedAssetName,
+              manifest.archiveSize > 0,
+              manifest.archiveSize <= 536_870_912,
+              manifest.downloadURL == expectedDownloadURL,
+              manifest.sha256.range(
+                  of: "^[0-9a-f]{64}$",
+                  options: .regularExpression
+              ) != nil,
+              manifest.signature.algorithm == "ed25519",
+              !manifest.signature.keyID.isEmpty,
+              Data(base64Encoded: manifest.signature.value)?.count == 64
         else {
             throw AppUpdateError.invalidRelease
         }
         guard current < latest else {
             return .current
         }
-        let version = release.tagName.hasPrefix("v")
-            ? String(release.tagName.dropFirst())
-            : release.tagName
-        let expectedAssetName = "Neovide-Tabs-\(version)-macOS-arm64.zip"
-        let expectedAssetPath = "/soyukke/neovide-tabs/releases/download/"
-            + "\(release.tagName)/\(expectedAssetName)"
-        guard let asset = release.assets.first(where: { asset in
-            asset.name == expectedAssetName
-                && asset.size > 0
-                && asset.size <= 536_870_912
-                && asset.downloadURL.scheme == "https"
-                && asset.downloadURL.host == "github.com"
-                && asset.downloadURL.path == expectedAssetPath
-        }) else {
-            throw AppUpdateError.missingArm64Asset
-        }
-        let expectedManifestPath = "/soyukke/neovide-tabs/releases/download/"
-            + "\(release.tagName)/latest.json"
-        guard let manifest = release.assets.first(where: { asset in
-            asset.name == "latest.json"
-                && asset.size > 0
-                && asset.size <= 65_536
-                && asset.downloadURL.scheme == "https"
-                && asset.downloadURL.host == "github.com"
-                && asset.downloadURL.path == expectedManifestPath
-        }) else {
-            throw AppUpdateError.missingManifestAsset
-        }
         return .available(
             AvailableAppUpdate(
                 version: version,
                 archiveName: expectedAssetName,
-                archiveSize: asset.size,
-                downloadURL: asset.downloadURL,
-                manifestURL: manifest.downloadURL,
-                releaseNotesURL: release.releaseNotesURL
+                archiveSize: manifest.archiveSize,
+                downloadURL: expectedDownloadURL,
+                manifestURL: manifestURL,
+                releaseNotesURL: releaseNotesURL
             )
         )
     }
@@ -375,32 +356,83 @@ final class AppUpdateChecker {
 
         let response = """
         {
-          "tag_name": "v1.2.4",
-          "html_url": "https://github.com/soyukke/neovide-tabs/releases/tag/v1.2.4",
-          "assets": [
-            {
-              "name": "Neovide-Tabs-1.2.4-macOS-arm64.zip",
-              "size": 1024,
-              "browser_download_url": "https://github.com/soyukke/neovide-tabs/releases/download/v1.2.4/Neovide-Tabs-1.2.4-macOS-arm64.zip"
-            },
-            {
-              "name": "latest.json",
-              "size": 512,
-              "browser_download_url": "https://github.com/soyukke/neovide-tabs/releases/download/v1.2.4/latest.json"
-            }
-          ]
+          "schemaVersion": 2,
+          "version": "1.2.4",
+          "build": "1",
+          "channel": "development",
+          "minimumMacOS": "14.0",
+          "architecture": "arm64",
+          "archive": "Neovide-Tabs-1.2.4-macOS-arm64.zip",
+          "archiveSize": 1024,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "downloadURL": "https://github.com/soyukke/neovide-tabs/releases/download/v1.2.4/Neovide-Tabs-1.2.4-macOS-arm64.zip",
+          "notarized": false,
+          "signature": {
+            "algorithm": "ed25519",
+            "keyID": "self-test",
+            "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+          }
         }
         """
+        let invalidResponse = response.replacingOccurrences(
+            of: "https://github.com/soyukke/neovide-tabs/releases/download/",
+            with: "https://example.com/soyukke/neovide-tabs/releases/download/"
+        )
         guard let data = response.data(using: .utf8),
+              let invalidData = invalidResponse.data(using: .utf8),
               case let .available(update) = try? evaluate(
                   data: data,
                   currentVersion: "1.2.3"
               ),
               update.version == "1.2.4",
-              case .current = try? evaluate(data: data, currentVersion: "1.2.4")
+              update.archiveSize == 1024,
+              update.manifestURL.path
+                == "/soyukke/neovide-tabs/releases/download/v1.2.4/latest.json",
+              case .current = try? evaluate(data: data, currentVersion: "1.2.4"),
+              case nil = try? evaluate(data: invalidData, currentVersion: "1.2.3")
         else {
             return false
         }
+        return true
+    }
+
+    static func runLiveSmoke(currentVersion: String, expected: String) -> Bool {
+        let semaphore = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var observed = ""
+        let task = AppUpdateChecker().check(currentVersion: currentVersion) { result in
+            let value: String
+            switch result {
+            case .success(.current):
+                value = "current"
+            case let .success(.available(update)):
+                value = "available:\(update.version)"
+            case let .failure(error):
+                value = "error:\(error.localizedDescription)"
+            }
+            lock.lock()
+            observed = value
+            lock.unlock()
+            semaphore.signal()
+        }
+        guard task != nil,
+              semaphore.wait(timeout: .now() + 30) == .success
+        else {
+            task?.cancel()
+            fputs("update live smoke timed out\n", stderr)
+            return false
+        }
+        lock.lock()
+        let result = observed
+        lock.unlock()
+        guard result == expected else {
+            fputs(
+                "update live smoke expected \(expected), observed \(result)\n",
+                stderr
+            )
+            return false
+        }
+        print("update live smoke passed: \(result)")
         return true
     }
 }
@@ -6606,6 +6638,20 @@ struct NeovideTabsApplication {
                 fatalError("update self-test failed")
             }
             print("update self-test passed")
+            return
+        }
+        if let currentVersion = ProcessInfo.processInfo.environment[
+            "NVTERM_UPDATE_LIVE_CHECK_VERSION"
+        ] {
+            let expected = ProcessInfo.processInfo.environment[
+                "NVTERM_UPDATE_LIVE_CHECK_EXPECTED"
+            ] ?? "current"
+            if !AppUpdateChecker.runLiveSmoke(
+                currentVersion: currentVersion,
+                expected: expected
+            ) {
+                fatalError("update live smoke failed")
+            }
             return
         }
 

@@ -57,6 +57,10 @@ native-release:
 native-update-test:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-update-test; else just native-build && NVTERM_UPDATE_SELF_TEST=1 spikes/macos-shell/.build/NativeShellSpike; fi
 
+# Verify the production update endpoint without consuming GitHub API quota.
+native-update-live-smoke:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-update-live-smoke; else version=$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -1); just native-build && NVTERM_UPDATE_LIVE_CHECK_VERSION="$version" NVTERM_UPDATE_LIVE_CHECK_EXPECTED=current spikes/macos-shell/.build/NativeShellSpike; fi
+
 # Verify the external updater swaps, validates, and preserves the previous app.
 native-update-install-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-update-install-smoke; else just native-package && ./scripts/native-update-install-smoke; fi

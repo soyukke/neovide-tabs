@@ -45,6 +45,11 @@ targets Apple Silicon only.
   version; manual checks report all outcomes. Update and Restart drives the
   verified download and replacement flow, with manual download retained only as
   an error fallback.
+- Discovery downloads `latest.json` through GitHub's stable
+  `releases/latest/download` redirect instead of the unauthenticated REST API,
+  so update availability does not depend on the shared 60-request API rate
+  limit. A validated version then pins the manifest, archive, and release-notes
+  URLs to one concrete tag before installation.
 - Release archives carry an Ed25519 signature over the exact ZIP bytes in the
   schema-2 manifest. The trust anchor is the public key embedded in the
   installed application. The private key exists only in the maintainer's macOS
