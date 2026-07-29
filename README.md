@@ -1,15 +1,65 @@
-# neovide-tabs
+<p align="center">
+  <img src="assets/app-icon.png" width="180" height="180" alt="Neovide Tabs app icon">
+</p>
 
-Experimental terminal built around a Rust terminal core, a Neovide-like
-renderer, and a native macOS AppKit/Metal shell. The default `just terminal`
-path builds the Rust core/runtime and launches the AppKit host. Terminal bytes
-flow through a PTY-backed `libghostty-vt` runtime, while the native host owns
-the macOS window, menu, tab UI, and AppKit event translation.
+<h1 align="center">Neovide Tabs</h1>
 
-Neovide Tabs supports Apple Silicon Macs running macOS 14 or newer. Intel Macs
-are not supported.
+<p align="center">
+  A native macOS terminal with tabs, splits, animated cursor movement, and smooth scrolling.
+</p>
 
-## Run
+<p align="center">
+  <a href="https://github.com/soyukke/neovide-tabs/releases/latest"><img
+    src="https://img.shields.io/github/v/release/soyukke/neovide-tabs"
+    alt="Latest release"></a>
+  <a href="https://github.com/soyukke/neovide-tabs/actions/workflows/macos.yml"><img
+    src="https://github.com/soyukke/neovide-tabs/actions/workflows/macos.yml/badge.svg"
+    alt="macOS production gate"></a>
+  <a href="LICENSE"><img
+    src="https://img.shields.io/github/license/soyukke/neovide-tabs"
+    alt="MIT License"></a>
+</p>
+
+Neovide Tabs combines a Rust terminal core and Neovide-derived Skia/Metal
+renderer with a native AppKit shell. Terminal bytes flow through a real PTY and
+`libghostty-vt`, while AppKit owns the macOS window, menus, tabs, pane layout,
+settings, and input translation.
+
+## Highlights
+
+- Native tabs, recursive splits, working-directory inheritance, and session
+  restore.
+- Neovide-style animated cursor movement and retained smooth scrolling.
+- Native copy/paste, IME, rectangular selection, scrollback search, clickable
+  links, and a scroll indicator.
+- A native Settings window for appearance, shell, startup directory,
+  keybindings, session behavior, and signed updates.
+- An experimental native Neovim UI backed by `nvim --embed`, `ext_multigrid`,
+  and the same Skia/Metal renderer.
+- Kitty graphics support and an owner-only `nvtermctl` automation interface.
+- Publisher-signed in-app updates distributed through GitHub Releases.
+
+## Requirements
+
+- Apple Silicon Mac
+- macOS 14 or newer
+
+Intel Macs are not supported.
+
+## Install
+
+1. Download the macOS arm64 ZIP from the
+   [latest GitHub Release](https://github.com/soyukke/neovide-tabs/releases/latest).
+2. Extract `Neovide Tabs.app` and move it to `/Applications`.
+3. Launch the application from `/Applications`.
+
+Public release archives are publisher-signed for the in-app updater but are
+not currently notarized with an Apple Developer ID. On first launch, macOS may
+require Control-clicking the app and choosing Open, or allowing it from
+System Settings → Privacy & Security. Later releases can be installed from
+Help → Check for Updates… → Update and Restart.
+
+## Build from source
 
 ```sh
 ./scripts/dev
@@ -21,9 +71,10 @@ or:
 nix develop --command just terminal
 ```
 
-The dev environment is managed by Nix flakes. `libghostty-vt-sys` currently
-needs Zig 0.15.2 for the Ghostty commit it builds, so the flake uses
-`nixpkgs#zig_0_15`.
+The development environment is managed by the repository's Nix flake and
+requires Xcode. `libghostty-vt-sys` currently needs Zig 0.15.2 for the Ghostty
+commit it builds, so the flake uses `nixpkgs#zig_0_15`. No Homebrew-managed
+dependencies are required.
 
 ```sh
 nix develop
@@ -136,19 +187,21 @@ Gatekeeper assessment, and only then writes the release archive and SHA-256
 manifest. Signing credentials and notary secrets are never stored in this
 repository.
 
-The packaged application checks GitHub's latest Release once after launch. It
+According to the Updates preference, the packaged application checks GitHub's
+latest Release after launch on an every-launch, daily, or weekly interval. It
 stays silent when current or offline and presents an alert only when a newer
 semantic version is available. Help → Check for Updates… performs the same
 check interactively and reports every outcome.
 
 Version 0.1.1 is the one-time updater bootstrap and must replace 0.1.0
-manually. Beginning with the release after 0.1.1, Update and Restart downloads
-the exact arm64 asset and schema-2 manifest, validates its declared size and
-SHA-256, verifies its Ed25519 publisher signature, extracts and validates the
-bundle ID/version/architecture/code signature, then stages it alongside the
-installed application. A detached helper waits for the old process to exit,
-swaps the staged bundle into place, launches it, and moves the previous bundle
-to the user's Trash so rollback remains possible.
+manually. Version 0.1.1 and later can install newer releases through Update and
+Restart. The updater downloads the exact arm64 asset and schema-2 manifest,
+validates its declared size and SHA-256, verifies its Ed25519 publisher
+signature, extracts and validates the bundle ID/version/architecture/code
+signature, then stages it alongside the installed application. A detached
+helper waits for the old process to exit, swaps the staged bundle into place,
+launches it, and moves the previous bundle to the user's Trash so rollback
+remains possible.
 
 The Ed25519 public key and identifier are checked in at
 [`assets/update-signing-public-key.json`](assets/update-signing-public-key.json).
@@ -337,6 +390,13 @@ The native Neovim compositor can continue toward deeper Neovide parity,
 including externalized windows and richer editor-side drag selection. Those
 renderer extensions remain event-driven; terminal behavior stays owned by
 `libghostty-vt`.
+
+## Contributing
+
+Bug reports and focused feature requests are welcome through GitHub Issues.
+Pull request creation is currently limited to repository collaborators. Before
+publishing a change, run `just precommit`; renderer changes should also run the
+relevant native terminal or Neovim smoke recipes.
 
 ## License
 
