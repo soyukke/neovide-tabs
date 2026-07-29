@@ -49,8 +49,18 @@ cleanup() {
 acquire_lock
 trap cleanup EXIT INT TERM
 
-MACOSX_DEPLOYMENT_TARGET="$minimum_macos" cargo build --lib --bin nvtermctl
 sdk="$(env -u SDKROOT -u DEVELOPER_DIR /usr/bin/xcrun --sdk macosx --show-sdk-path)"
+portable_ldflags=("-L$sdk/usr/lib")
+read -r -a inherited_ldflags <<<"${NIX_LDFLAGS:-}"
+for flag in "${inherited_ldflags[@]}"; do
+  case "$flag" in
+    -L/nix/store/*-libiconv-*/lib) ;;
+    *) portable_ldflags+=("$flag") ;;
+  esac
+done
+NIX_LDFLAGS="${portable_ldflags[*]}" \
+  MACOSX_DEPLOYMENT_TARGET="$minimum_macos" \
+  cargo build --lib --bin nvtermctl
 env -u SDKROOT -u DEVELOPER_DIR \
   /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc \
   -parse-as-library \

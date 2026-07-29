@@ -9,6 +9,11 @@ fi
 app_path="spikes/macos-shell/.build/package/Neovide Tabs.app"
 executable="$app_path/Contents/MacOS/neovide-tabs"
 control_executable="$app_path/Contents/MacOS/nvtermctl"
+package_version="$(
+  sed -nE 's/^version = "([^"]+)"$/\1/p' Cargo.toml |
+    head -n 1
+)"
+test -n "$package_version"
 
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$app_path"
 /usr/bin/codesign --verify --strict --verbose=2 "$control_executable"
@@ -16,6 +21,14 @@ test -s "$app_path/Contents/Resources/AppIcon.icns"
 test -s "$app_path/Contents/Resources/update-signing-public-key.json"
 test -x "$app_path/Contents/Resources/apply-update"
 test -x "$control_executable"
+for packaged_executable in "$executable" "$control_executable"; do
+  if /usr/bin/otool -L "$packaged_executable" |
+    awk 'NR > 1 { print $1 }' |
+    grep -Eq '^/nix/store/'; then
+    echo "packaged executable depends on the Nix store: $packaged_executable" >&2
+    exit 65
+  fi
+done
 test "$(/usr/bin/lipo -archs "$control_executable")" = "arm64"
 test "$(
   env -u SDKROOT -u DEVELOPER_DIR /usr/bin/vtool -show-build "$executable" |
@@ -25,6 +38,8 @@ test "$(
   env -u SDKROOT -u DEVELOPER_DIR /usr/bin/vtool -show-build "$control_executable" |
     awk '/minos/ {print $2; exit}'
 )" = "14.0"
+env -i PATH=/usr/bin:/bin "$control_executable" --version |
+  grep -Fx "nvtermctl $package_version"
 
 env -u NVTERM_FONT \
   NVTERM_NATIVE_EXECUTABLE="$executable" \

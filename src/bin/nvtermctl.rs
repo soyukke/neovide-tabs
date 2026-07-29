@@ -19,6 +19,10 @@ fn main() {
 
 fn run() -> Result<()> {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
+    if version_requested(&args) {
+        println!("nvtermctl {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let socket = extract_value(&mut args, "--socket")
         .map(PathBuf::from)
         .or_else(|| env::var_os("NVTERM_SOCKET").map(PathBuf::from))
@@ -28,6 +32,10 @@ fn run() -> Result<()> {
     let request = parse_request(&mut args)?;
     let response = send_request(&socket, &request)?;
     print_response(response, json_output)
+}
+
+fn version_requested(args: &[String]) -> bool {
+    args.len() == 1 && args[0] == "--version"
 }
 
 fn parse_request(args: &mut Vec<String>) -> Result<ControlRequest> {
@@ -280,7 +288,8 @@ fn default_socket_path() -> Option<PathBuf> {
 }
 
 fn usage() -> &'static str {
-    "usage: nvtermctl [--socket PATH] [--json] COMMAND
+    "usage: nvtermctl --version
+       nvtermctl [--socket PATH] [--json] COMMAND
 
 commands:
   list
@@ -337,5 +346,15 @@ mod tests {
                 cwd: Some("/tmp".to_owned())
             }
         );
+    }
+
+    #[test]
+    fn version_request_is_exact_and_does_not_require_socket_arguments() {
+        assert!(version_requested(&["--version".to_owned()]));
+        assert!(!version_requested(&[]));
+        assert!(!version_requested(&[
+            "--version".to_owned(),
+            "--json".to_owned()
+        ]));
     }
 }
