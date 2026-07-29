@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+  exec nix develop --command ./scripts/native-settings-smoke "$@"
+fi
+
+app="${NVTERM_NATIVE_EXECUTABLE:-spikes/macos-shell/.build/NativeShellSpike}"
+socket_root="$(mktemp -d "${TMPDIR:-/tmp}/neovide-tabs-settings-smoke.XXXXXX")"
+app_pid=""
+
+cleanup() {
+  if [[ -n "$app_pid" ]] && kill -0 "$app_pid" 2>/dev/null; then
+    kill "$app_pid" 2>/dev/null || true
+    wait "$app_pid" 2>/dev/null || true
+  fi
+  rm -rf -- "$socket_root"
+}
+trap cleanup EXIT INT TERM
+
+for tab in general appearance terminal keybindings updates; do
+  shot="spikes/macos-shell/.build/native-settings-${tab}.png"
+  window_id_file="$socket_root/${tab}-window-id"
+  app_log="$socket_root/${tab}-app.log"
+  rm -f "$shot" "$window_id_file"
+  NVTERM_CONTROL_SOCKET="$socket_root/${tab}.sock" \
+    NVTERM_NATIVE_SMOKE_SCENARIO=settings \
+    NVTERM_NATIVE_SMOKE_WINDOW_ID="$window_id_file" \
+    NVTERM_SETTINGS_TAB="$tab" \
+    "$app" >"$app_log" 2>&1 &
+  app_pid=$!
+
+  for _ in {1..100}; do
+    if [[ -s "$window_id_file" ]] && kill -0 "$app_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ ! -s "$window_id_file" ]]; then
+    cat "$app_log" >&2
+    echo "settings smoke failed: $tab window did not become ready" >&2
+    exit 1
+  fi
+  window_id="$(tr -d '[:space:]' <"$window_id_file")"
+  captured=false
+  for _ in {1..20}; do
+    if ./scripts/native-window-capture "$window_id" "$shot" && [[ -s "$shot" ]]; then
+      captured=true
+      break
+    fi
+    sleep 0.1
+  done
+  if [[ "$captured" != true ]]; then
+    cat "$app_log" >&2
+    echo "settings smoke failed: $tab window could not be captured" >&2
+    exit 1
+  fi
+  kill "$app_pid" 2>/dev/null || true
+  wait "$app_pid" 2>/dev/null || true
+  app_pid=""
+
+  width="$(/usr/bin/sips -g pixelWidth "$shot" | awk '/pixelWidth/ {print $2}')"
+  height="$(/usr/bin/sips -g pixelHeight "$shot" | awk '/pixelHeight/ {print $2}')"
+  bytes="$(/usr/bin/stat -f '%z' "$shot")"
+  if (( width < 600 || height < 400 || bytes < 20000 )); then
+    echo "settings smoke failed: $tab ${width}x${height} ${bytes} bytes" >&2
+    exit 1
+  fi
+  echo "native settings tab passed: $tab ${width}x${height} ${bytes} bytes"
+done

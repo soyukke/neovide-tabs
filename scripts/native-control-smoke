@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+  exec nix develop --command ./scripts/native-control-smoke "$@"
+fi
+
+app="${NVTERM_NATIVE_EXECUTABLE:-spikes/macos-shell/.build/NativeShellSpike}"
+cli="${NVTERM_CONTROL_EXECUTABLE:-target/debug/nvtermctl}"
+cli="$(cd "$(dirname "$cli")" && pwd)/$(basename "$cli")"
+smoke_root="$(mktemp -d "${TMPDIR:-/tmp}/neovide-tabs-control-smoke.XXXXXX")"
+socket="$smoke_root/control.sock"
+app_log="$smoke_root/app.log"
+
+NVTERM_CONTROL_SOCKET="$socket" \
+  NVTERM_NATIVE_SMOKE_SCENARIO=control \
+  "$app" >"$app_log" 2>&1 &
+app_pid=$!
+
+cleanup() {
+  if kill -0 "$app_pid" 2>/dev/null; then
+    kill "$app_pid" 2>/dev/null || true
+    wait "$app_pid" 2>/dev/null || true
+  fi
+  rm -rf -- "$smoke_root"
+}
+trap cleanup EXIT INT TERM
+
+for _ in {1..100}; do
+  if [[ -S "$socket" ]] && kill -0 "$app_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+if [[ ! -S "$socket" ]]; then
+  cat "$app_log" >&2
+  echo "control smoke failed: socket was not created" >&2
+  exit 1
+fi
+if [[ "$(/usr/bin/stat -f '%Lp' "$socket")" != "600" ]]; then
+  echo "control smoke failed: socket is not mode 0600" >&2
+  exit 1
+fi
+
+list="$("$cli" --socket "$socket" --json list)"
+jq -e '.ok and .result.activeTab == 1 and (.result.panes | length) == 1' <<<"$list" >/dev/null
+
+"$cli" --socket "$socket" send --pane 1 \
+  "if [ \"\$NVTERM_TAB_ID:\$NVTERM_PANE_ID:\$NVTERM_SOCKET:\$NVTERMCTL\" = \"1:1:$socket:$cli\" ] && [ \"\$(command -v nvtermctl)\" = \"\$NVTERMCTL\" ]; then echo CONTROL_READY:OK; else echo CONTROL_READY:BAD; fi" \
+  >/dev/null
+"$cli" --socket "$socket" key --pane 1 Enter >/dev/null
+for _ in {1..100}; do
+  screen="$("$cli" --socket "$socket" read-screen --pane 1)"
+  if rg -Fq "CONTROL_READY:OK" <<<"$screen"; then
+    break
+  fi
+  sleep 0.05
+done
+if ! rg -Fq "CONTROL_READY:OK" <<<"${screen:-}"; then
+  printf '%s\n' "${screen:-<empty screen>}" >&2
+  cat "$app_log" >&2
+  echo "control smoke failed: pane environment or read-screen mismatch" >&2
+  exit 1
+fi
+
+new_tab="$("$cli" --socket "$socket" --json new-tab --cwd "$smoke_root")"
+jq -e '.result.tab == 2 and .result.pane == 2' <<<"$new_tab" >/dev/null
+"$cli" --socket "$socket" rename-tab --tab 2 controlled >/dev/null
+"$cli" --socket "$socket" set-theme --tab 2 Harbor >/dev/null
+split="$("$cli" --socket "$socket" --json split --pane 2 --horizontal --cwd "$smoke_root")"
+jq -e '.result.tab == 2 and .result.pane == 3' <<<"$split" >/dev/null
+"$cli" --socket "$socket" status set --pane 3 running "integration smoke" >/dev/null
+
+"$cli" --socket "$socket" --json status wait --pane 3 --timeout 5 >"$smoke_root/wait.json" &
+wait_pid=$!
+sleep 0.1
+"$cli" --socket "$socket" status set --pane 3 "done" "control complete" >/dev/null
+wait "$wait_pid"
+jq -e '.ok and .result.status == "done" and .result.summary == "control complete"' \
+  "$smoke_root/wait.json" >/dev/null
+
+final="$("$cli" --socket "$socket" --json list)"
+jq -e '
+  .ok
+    and (.result.tabs | length) == 2
+    and (.result.panes | length) == 3
+    and (.result.tabs[] | select(.id == 2) | .title == "controlled" and .theme == "Harbor")
+    and (.result.panes[] | select(.id == 3) | .status.status == "done")
+' <<<"$final" >/dev/null
+
+echo "native control smoke passed"

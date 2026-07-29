@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     env,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use libghostty_vt::{
     RenderState, Terminal, TerminalOptions,
     fmt::Format,
@@ -28,7 +28,10 @@ use libghostty_vt::{
     terminal::{Mode, Point, PointCoordinate, ScrollViewport},
 };
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use crate::neovide_render::{
     NeovideLine, NeovideRenderedWindowCache, NeovideRenderedWindowPlacement,
@@ -62,6 +65,14 @@ impl TerminalGridSize {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct TerminalSpawnConfig {
+    pub cwd: Option<PathBuf>,
+    pub shell: Option<String>,
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+}
+
 pub struct NativeTerminalRuntime {
     pty: RuntimePty,
     pty_replies: Rc<RefCell<Vec<u8>>>,
@@ -82,11 +93,21 @@ pub struct NativeTerminalRuntime {
 
 impl NativeTerminalRuntime {
     pub fn spawn(size: TerminalGridSize) -> Result<Self> {
-        Self::spawn_in_cwd(size, None)
+        Self::spawn_with_config(size, TerminalSpawnConfig::default())
     }
 
     pub fn spawn_in_cwd(size: TerminalGridSize, cwd: Option<&Path>) -> Result<Self> {
-        let pty = RuntimePty::spawn(size, cwd)?;
+        Self::spawn_with_config(
+            size,
+            TerminalSpawnConfig {
+                cwd: cwd.map(Path::to_path_buf),
+                ..TerminalSpawnConfig::default()
+            },
+        )
+    }
+
+    pub fn spawn_with_config(size: TerminalGridSize, config: TerminalSpawnConfig) -> Result<Self> {
+        let pty = RuntimePty::spawn(size, &config)?;
         let pty_replies = Rc::new(RefCell::new(Vec::new()));
         let bell_count = Rc::new(Cell::new(0_u64));
         let mut terminal = Terminal::new(TerminalOptions {
@@ -119,9 +140,7 @@ impl NativeTerminalRuntime {
             renderer: TerminalFrameRenderer::new()?,
             renderer_model: TerminalRendererModel::new(size),
             size,
-            current_working_directory: cwd
-                .map(Path::to_path_buf)
-                .or_else(|| env::current_dir().ok()),
+            current_working_directory: config.cwd.or_else(|| env::current_dir().ok()),
             last_search: None,
             kitty_image_cache: RefCell::new(HashMap::new()),
             exited: false,
@@ -471,6 +490,22 @@ impl NativeTerminalRuntime {
         self.renderer.collect(&mut self.terminal)
     }
 
+    pub fn screen_text(&mut self) -> Result<String> {
+        let frame = self.frame()?;
+        Ok(frame
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+
     pub fn renderer_model(&mut self) -> Result<NeovideRendererModelSnapshot> {
         let frame = self.frame()?;
         Ok(self.renderer_model.snapshot(&frame))
@@ -633,11 +668,11 @@ struct RuntimePty {
 }
 
 impl RuntimePty {
-    fn spawn(size: TerminalGridSize, cwd: Option<&Path>) -> Result<Self> {
+    fn spawn(size: TerminalGridSize, config: &TerminalSpawnConfig) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(size.pty_size())?;
-        let mut cmd = CommandBuilder::new(default_shell());
-        configure_shell_command(&mut cmd, cwd);
+        let mut cmd = CommandBuilder::new(configured_shell(config.shell.as_deref())?);
+        configure_shell_command(&mut cmd, config);
 
         let child = pair.slave.spawn_command(cmd)?;
         let process_group_id = child.process_id().and_then(|pid| i32::try_from(pid).ok());
@@ -757,13 +792,10 @@ fn terminate_pty_process_tree(child: &mut dyn Child, _process_group_id: Option<i
     let _ = child.wait();
 }
 
-fn configure_shell_command(cmd: &mut CommandBuilder, cwd: Option<&Path>) {
+fn configure_shell_command(cmd: &mut CommandBuilder, config: &TerminalSpawnConfig) {
     cmd.arg("-l");
     cmd.arg("-i");
-    if let Some(cwd) = cwd
-        .map(Path::to_path_buf)
-        .or_else(|| env::current_dir().ok())
-    {
+    if let Some(cwd) = config.cwd.clone().or_else(|| env::current_dir().ok()) {
         cmd.cwd(&cwd);
         cmd.env("PWD", cwd);
     }
@@ -774,6 +806,11 @@ fn configure_shell_command(cmd: &mut CommandBuilder, cwd: Option<&Path>) {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("NVTERM_PROTO", "libghostty-vt");
+    for (key, value) in &config.environment {
+        if key.starts_with("NVTERM_") || key == "PATH" {
+            cmd.env(key, value);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -868,7 +905,7 @@ fn configure_kitty_graphics(terminal: &mut Terminal<'static, 'static>) -> Result
         .set_apc_max_bytes_kitty(Some(16 * 1024 * 1024))?
         .set_kitty_image_from_file_allowed(false)?
         .set_kitty_image_from_temp_file_allowed(true)?
-        .set_kitty_image_from_shared_mem_allowed(false)?;
+        .set_kitty_image_from_shared_mem_allowed(true)?;
     Ok(())
 }
 
@@ -1791,6 +1828,28 @@ fn default_shell() -> String {
         .unwrap_or_else(|| "/bin/zsh".to_owned())
 }
 
+fn configured_shell(shell: Option<&str>) -> Result<String> {
+    let Some(shell) = shell.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(default_shell());
+    };
+    let path = Path::new(shell);
+    if !path.is_absolute() || !is_executable_file(path) {
+        bail!("configured shell must be an executable absolute file");
+    }
+    Ok(shell.to_owned())
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
 fn env_shell(key: &str) -> Option<String> {
     env::var(key).ok().filter(|shell| !shell.is_empty())
 }
@@ -2016,6 +2075,162 @@ mod tests {
     }
 
     #[test]
+    fn kitty_delete_removes_image_data_and_placement() {
+        let mut terminal = kitty_terminal(8, 4, 8);
+        transmit_kitty_png(&mut terminal, 31, 0);
+        assert_eq!(kitty_placement_summaries(&terminal).len(), 1);
+
+        terminal.vt_write(b"\x1b_Ga=d,d=I,i=31,q=0\x1b\\");
+
+        assert!(kitty_placement_summaries(&terminal).is_empty());
+        assert!(terminal.kitty_graphics().unwrap().image(31).is_none());
+    }
+
+    #[test]
+    fn kitty_placement_tracks_z_order_and_terminal_scroll() {
+        let mut terminal = kitty_terminal(8, 4, 16);
+        terminal.vt_write(b"\x1b[4;1H");
+        transmit_kitty_png(&mut terminal, 41, -3);
+        let before = kitty_placement_summaries(&terminal);
+        assert_eq!(before, vec![(41, -3, 2, true)]);
+
+        terminal.vt_write(b"\r\none\r\ntwo\r\nthree\r\n");
+        let after = kitty_placement_summaries(&terminal);
+
+        assert_eq!(after[0].0, 41);
+        assert_eq!(after[0].1, -3);
+        assert!(after[0].2 < before[0].2 || !after[0].3);
+    }
+
+    #[test]
+    fn kitty_placement_survives_resize_with_valid_geometry() {
+        let mut terminal = kitty_terminal(8, 4, 8);
+        transmit_kitty_png(&mut terminal, 51, 2);
+
+        terminal.resize(12, 6, 10, 20).unwrap();
+        let graphics = terminal.kitty_graphics().unwrap();
+        let mut iterator = PlacementIterator::new().unwrap();
+        let mut placements = iterator.update(&graphics).unwrap();
+        let placement = placements.next().unwrap();
+        let image = graphics.image(placement.image_id().unwrap()).unwrap();
+        let info = placement.placement_render_info(&image, &terminal).unwrap();
+
+        assert!(info.viewport_visible);
+        assert_eq!(info.viewport_col, 0);
+        assert_eq!(info.viewport_row, 0);
+        assert_eq!(info.source_width, 1);
+        assert_eq!(info.source_height, 1);
+    }
+
+    #[test]
+    fn kitty_graphics_state_is_isolated_between_panes() {
+        let mut first = kitty_terminal(8, 4, 8);
+        let second = kitty_terminal(8, 4, 8);
+        transmit_kitty_png(&mut first, 61, 0);
+
+        assert_eq!(kitty_placement_summaries(&first).len(), 1);
+        assert!(kitty_placement_summaries(&second).is_empty());
+        assert!(second.kitty_graphics().unwrap().image(61).is_none());
+    }
+
+    #[test]
+    fn kitty_temp_file_transfer_is_consumed_with_safe_transport_policy() {
+        let mut terminal = kitty_terminal(8, 4, 8);
+        assert!(!terminal.is_kitty_image_from_file_allowed().unwrap());
+        assert!(terminal.is_kitty_image_from_temp_file_allowed().unwrap());
+        assert!(terminal.is_kitty_image_from_shared_mem_allowed().unwrap());
+        let path = std::env::temp_dir().join(format!(
+            "tty-graphics-protocol-neovide-tabs-{}-{}.png",
+            std::process::id(),
+            71
+        ));
+        std::fs::write(&path, one_pixel_png()).unwrap();
+        let encoded_path = base64_encode(path.to_string_lossy().as_bytes());
+        terminal.vt_write(format!("\x1b_Ga=T,f=100,t=t,i=71,q=0;{encoded_path}\x1b\\").as_bytes());
+
+        assert_eq!(kitty_placement_summaries(&terminal).len(), 1);
+        assert!(terminal.kitty_graphics().unwrap().image(71).is_some());
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kitty_shared_memory_transfer_is_consumed() {
+        use std::ffi::CString;
+
+        let mut terminal = kitty_terminal(8, 4, 8);
+        let name =
+            CString::new(format!("/neovide-tabs-kitty-{}-{}", std::process::id(), 72)).unwrap();
+        // SAFETY: this only removes a stale object with the test-specific name.
+        unsafe {
+            libc::shm_unlink(name.as_ptr());
+        }
+        // SAFETY: the name is a valid NUL-terminated POSIX shared-memory name.
+        let fd = unsafe {
+            libc::shm_open(
+                name.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                0o600,
+            )
+        };
+        assert!(fd >= 0);
+        let png = one_pixel_png();
+        // SAFETY: `fd` is valid and the requested size is the PNG byte length.
+        assert_eq!(unsafe { libc::ftruncate(fd, png.len() as libc::off_t) }, 0);
+        // SAFETY: the mapping covers the whole resized shared-memory object.
+        let mapping = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                png.len(),
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        assert_ne!(mapping, libc::MAP_FAILED);
+        // SAFETY: both buffers are valid for `png.len()` bytes and do not overlap.
+        unsafe {
+            std::ptr::copy_nonoverlapping(png.as_ptr(), mapping.cast(), png.len());
+            libc::munmap(mapping, png.len());
+            libc::close(fd);
+        }
+        let encoded_name = base64_encode(name.as_bytes());
+        terminal.vt_write(format!("\x1b_Ga=T,f=100,t=s,i=72,q=0;{encoded_name}\x1b\\").as_bytes());
+        // SAFETY: unlinking this test-owned name is safe whether the parser already did so or not.
+        unsafe {
+            libc::shm_unlink(name.as_ptr());
+        }
+
+        assert_eq!(kitty_placement_summaries(&terminal).len(), 1);
+        assert!(terminal.kitty_graphics().unwrap().image(72).is_some());
+    }
+
+    #[test]
+    fn unsupported_kitty_command_does_not_corrupt_following_text() {
+        let mut terminal = kitty_terminal(32, 4, 8);
+        terminal.vt_write(b"before\r\n\x1b_Ga=x,q=2;ignored\x1b\\after");
+        let frame = TerminalFrameRenderer::new()
+            .unwrap()
+            .collect(&mut terminal)
+            .unwrap();
+        let text = frame
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("before"));
+        assert!(text.contains("after"));
+        assert!(kitty_placement_summaries(&terminal).is_empty());
+    }
+
+    #[test]
     fn terminal_pwd_path_decodes_osc7_file_uri() {
         assert_eq!(
             terminal_pwd_path("file://localhost/Users/soyukke/dev%20app").unwrap(),
@@ -2025,6 +2240,22 @@ mod tests {
             terminal_pwd_path("file:///tmp/neovide-tabs").unwrap(),
             PathBuf::from("/tmp/neovide-tabs")
         );
+    }
+
+    #[test]
+    fn configured_shell_requires_an_executable_absolute_file() {
+        assert_eq!(configured_shell(Some("/bin/sh")).unwrap(), "/bin/sh");
+        assert!(configured_shell(Some("relative-shell")).is_err());
+        let path = std::env::temp_dir().join(format!(
+            "neovide-tabs-non-executable-shell-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(configured_shell(path.to_str()).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -2164,6 +2395,83 @@ mod tests {
 
     fn frame(lines: &[&str]) -> TerminalFrameSnapshot {
         frame_with_rows(lines.iter().map(|line| row(line)).collect())
+    }
+
+    fn kitty_terminal(cols: u16, rows: u16, scrollback: usize) -> Terminal<'static, 'static> {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols,
+            rows,
+            max_scrollback: scrollback,
+        })
+        .unwrap();
+        terminal.resize(cols, rows, 8, 16).unwrap();
+        configure_kitty_graphics(&mut terminal).unwrap();
+        terminal
+    }
+
+    fn transmit_kitty_png(terminal: &mut Terminal<'static, 'static>, image_id: u32, z: i32) {
+        const PNG: &str = concat!(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA",
+            "DUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+        );
+        terminal.vt_write(format!("\x1b_Ga=T,f=100,i={image_id},z={z},q=0;{PNG}\x1b\\").as_bytes());
+    }
+
+    fn kitty_placement_summaries(
+        terminal: &Terminal<'static, 'static>,
+    ) -> Vec<(u32, i32, i32, bool)> {
+        let graphics = terminal.kitty_graphics().unwrap();
+        let mut iterator = PlacementIterator::new().unwrap();
+        let mut placements = iterator.update(&graphics).unwrap();
+        let mut output = Vec::new();
+        while let Some(placement) = placements.next() {
+            let image_id = placement.image_id().unwrap();
+            let image = graphics.image(image_id).unwrap();
+            let info = placement.placement_render_info(&image, terminal).unwrap();
+            output.push((
+                image_id,
+                placement.z().unwrap(),
+                info.viewport_row,
+                info.viewport_visible,
+            ));
+        }
+        output
+    }
+
+    fn one_pixel_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[255, 0, 0, 255]).unwrap();
+        }
+        bytes
+    }
+
+    fn base64_encode(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let value = (u32::from(chunk[0]) << 16)
+                | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+                | u32::from(*chunk.get(2).unwrap_or(&0));
+            output.push(char::from(ALPHABET[((value >> 18) & 63) as usize]));
+            output.push(char::from(ALPHABET[((value >> 12) & 63) as usize]));
+            output.push(if chunk.len() > 1 {
+                char::from(ALPHABET[((value >> 6) & 63) as usize])
+            } else {
+                '='
+            });
+            output.push(if chunk.len() > 2 {
+                char::from(ALPHABET[(value & 63) as usize])
+            } else {
+                '='
+            });
+        }
+        output
     }
 
     fn frame_with_rows(rows: Vec<Vec<TerminalCellSnapshot>>) -> TerminalFrameSnapshot {

@@ -408,6 +408,9 @@ final class AppUpdateChecker {
 @_silgen_name("nvterm_core_create")
 func nvterm_core_create() -> UnsafeMutableRawPointer?
 
+@_silgen_name("nvterm_core_create_with_theme")
+func nvterm_core_create_with_theme(_ theme: UnsafePointer<CChar>?) -> UnsafeMutableRawPointer?
+
 @_silgen_name("nvterm_core_destroy")
 func nvterm_core_destroy(_ handle: UnsafeMutableRawPointer?)
 
@@ -440,6 +443,12 @@ func nvterm_core_set_tab_theme(
     _ theme: UnsafePointer<CChar>?
 ) -> UInt8
 
+@_silgen_name("nvterm_core_set_default_theme")
+func nvterm_core_set_default_theme(
+    _ handle: UnsafeMutableRawPointer?,
+    _ theme: UnsafePointer<CChar>?
+) -> UInt8
+
 @_silgen_name("nvterm_core_snapshot_json")
 func nvterm_core_snapshot_json(_ handle: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
 
@@ -458,6 +467,15 @@ func nvterm_runtime_create_in_cwd(
     _ pixelWidth: UInt16,
     _ pixelHeight: UInt16,
     _ cwd: UnsafePointer<CChar>?
+) -> UnsafeMutableRawPointer?
+
+@_silgen_name("nvterm_runtime_create_config")
+func nvterm_runtime_create_config(
+    _ rows: UInt16,
+    _ cols: UInt16,
+    _ pixelWidth: UInt16,
+    _ pixelHeight: UInt16,
+    _ config: UnsafePointer<CChar>?
 ) -> UnsafeMutableRawPointer?
 
 @_silgen_name("nvterm_runtime_destroy")
@@ -589,6 +607,14 @@ func nvterm_runtime_renderer_scroll_position(_ handle: UnsafeMutableRawPointer?)
 @_silgen_name("nvterm_runtime_cwd")
 func nvterm_runtime_cwd(_ handle: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>?
 
+@_silgen_name("nvterm_runtime_screen_text")
+func nvterm_runtime_screen_text(
+    _ handle: UnsafeMutableRawPointer?
+) -> UnsafeMutablePointer<CChar>?
+
+@_silgen_name("nvterm_runtime_kitty_placement_count")
+func nvterm_runtime_kitty_placement_count(_ handle: UnsafeMutableRawPointer?) -> Int
+
 @_silgen_name("nvterm_nvim_create")
 func nvterm_nvim_create(
     _ rows: UInt16,
@@ -707,18 +733,23 @@ func nvterm_skia_metal_forget_runtime(
     _ runtime: UnsafeMutableRawPointer?
 )
 
+@_silgen_name("nvterm_skia_metal_set_font_family")
+func nvterm_skia_metal_set_font_family(
+    _ renderer: UnsafeMutableRawPointer?,
+    _ family: UnsafePointer<CChar>?
+) -> UInt8
+
 @_silgen_name("nvterm_skia_metal_next_frame_delay_ms")
 func nvterm_skia_metal_next_frame_delay_ms(_ renderer: UnsafeMutableRawPointer?) -> UInt64
 
 private let ffiSplitVertical: UInt32 = 0
 private let ffiSplitHorizontal: UInt32 = 1
-private let themes = ["Graphite", "Juniper", "Harbor", "Rose", "Paper"]
 private let terminalHorizontalInset: CGFloat = 12
 private let terminalTextTop: CGFloat = 38
 private let terminalTextBottomInset: CGFloat = 10
-private let defaultTerminalFontSize: CGFloat = 15
-private let minTerminalFontSize: CGFloat = 9
-private let maxTerminalFontSize: CGFloat = 32
+private let defaultTerminalFontSize = CGFloat(nativeDefaultFontSize)
+private let minTerminalFontSize = CGFloat(nativeMinimumFontSize)
+private let maxTerminalFontSize = CGFloat(nativeMaximumFontSize)
 private let maxOutputScrollAnimationRows = 12
 private let minTerminalVimScrollSmokePosition = 3.0
 private let maxTerminalBottomInputSmokePosition = 0.1
@@ -733,11 +764,6 @@ private let themeAccentColors: [String: NSColor] = [
     "Rose": NSColor(calibratedRed: 0.78, green: 0.32, blue: 0.48, alpha: 1.0),
     "Paper": NSColor(calibratedRed: 0.78, green: 0.57, blue: 0.26, alpha: 1.0),
 ]
-private let fontSizePreferenceKey = "terminalFontSize"
-private let optionAsAltPreferenceKey = "optionAsAlt"
-private let notificationsPreferenceKey = "bellNotifications"
-private let sessionRestorePreferenceKey = "restoreSession"
-private let sessionStatePreferenceKey = "sessionState"
 private let currentSessionSchemaVersion = 2
 
 struct NativeSessionState: Codable {
@@ -797,6 +823,7 @@ struct TerminalCoreSnapshot: Decodable {
 }
 
 struct TerminalCoreTabSnapshot: Decodable {
+    let id: Int
     let index: Int
     let title: String
     let active_pane: Int
@@ -913,8 +940,11 @@ struct SkiaRenderGeometry {
 final class RustCore {
     private let handle: UnsafeMutableRawPointer
 
-    init?() {
-        guard let handle = nvterm_core_create() else {
+    init?(defaultTheme: String = nativeThemeNames[0]) {
+        let handle = defaultTheme.withCString { value in
+            nvterm_core_create_with_theme(value)
+        }
+        guard let handle else {
             return nil
         }
         self.handle = handle
@@ -928,8 +958,9 @@ final class RustCore {
         decode(nvterm_core_snapshot_json(handle), as: TerminalCoreSnapshot.self)
     }
 
-    func newTab() {
-        _ = nvterm_core_new_tab(handle)
+    @discardableResult
+    func newTab() -> Int {
+        nvterm_core_new_tab(handle)
     }
 
     func splitActive(axis: UInt32) -> Int? {
@@ -961,6 +992,12 @@ final class RustCore {
         }
     }
 
+    func setDefaultTheme(_ theme: String) {
+        theme.withCString { value in
+            _ = nvterm_core_set_default_theme(handle, value)
+        }
+    }
+
     private func decode<T: Decodable>(_ pointer: UnsafeMutablePointer<CChar>?, as type: T.Type) -> T? {
         guard let pointer else {
             return nil
@@ -988,6 +1025,14 @@ protocol NativePane: AnyObject {
     func isExited() -> Bool
     func wakeupFD() -> Int32
     func renderHandle() -> UnsafeMutableRawPointer?
+    func controlScreenText() -> String
+    func controlImageCount() -> Int
+}
+
+struct NativeTerminalSpawnConfiguration: Encodable {
+    let cwd: String?
+    let shell: String?
+    let environment: [String: String]
 }
 
 struct NativeMouseInput {
@@ -1031,24 +1076,29 @@ final class RustTerminalPane: NativePane {
 
     init?(
         grid: (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int),
-        cwd: String? = nil
+        cwd: String? = nil,
+        shell: String? = nil,
+        environment: [String: String] = [:]
     ) {
-        let handle = cwd.flatMap { directory in
-            directory.withCString { value in
-                nvterm_runtime_create_in_cwd(
-                    clampedUInt16(grid.rows),
-                    clampedUInt16(grid.cols),
-                    clampedUInt16(grid.widthPixels),
-                    clampedUInt16(grid.heightPixels),
-                    value
-                )
-            }
-        } ?? nvterm_runtime_create(
-            clampedUInt16(grid.rows),
-            clampedUInt16(grid.cols),
-            clampedUInt16(grid.widthPixels),
-            clampedUInt16(grid.heightPixels)
+        let configuration = NativeTerminalSpawnConfiguration(
+            cwd: cwd,
+            shell: shell?.isEmpty == false ? shell : nil,
+            environment: environment
         )
+        guard let data = try? JSONEncoder().encode(configuration),
+              let json = String(data: data, encoding: .utf8)
+        else {
+            return nil
+        }
+        let handle = json.withCString { value in
+            nvterm_runtime_create_config(
+                clampedUInt16(grid.rows),
+                clampedUInt16(grid.cols),
+                clampedUInt16(grid.widthPixels),
+                clampedUInt16(grid.heightPixels),
+                value
+            )
+        }
         guard let handle else {
             NativeLog.runtimeError("terminal_runtime_create_failed")
             return nil
@@ -1232,6 +1282,14 @@ final class RustTerminalPane: NativePane {
         handle
     }
 
+    func controlScreenText() -> String {
+        ownedRustString(nvterm_runtime_screen_text(handle)) ?? ""
+    }
+
+    func controlImageCount() -> Int {
+        nvterm_runtime_kitty_placement_count(handle)
+    }
+
 }
 
 final class RustNeovimPane: NativePane {
@@ -1330,6 +1388,21 @@ final class RustNeovimPane: NativePane {
         handle
     }
 
+    func controlScreenText() -> String {
+        guard let model = rendererModel() else {
+            return ""
+        }
+        return model.windows
+            .filter { !$0.hidden }
+            .sorted { ($0.zindex, $0.grid_id) < ($1.zindex, $1.grid_id) }
+            .flatMap { window in window.lines.compactMap { $0?.text } }
+            .joined(separator: "\n")
+    }
+
+    func controlImageCount() -> Int {
+        0
+    }
+
     private func decode<T: Decodable>(_ pointer: UnsafeMutablePointer<CChar>?, as type: T.Type) -> T? {
         guard let pointer else {
             return nil
@@ -1413,6 +1486,7 @@ final class TerminalTextView: NSView, NSTextInputClient {
     private var paneFrames: [Int: NSRect] = [:]
     private var terminalFontSize = defaultTerminalFontSize
     private var terminalFont = NSFont.monospacedSystemFont(ofSize: defaultTerminalFontSize, weight: .regular)
+    private var terminalFontFamily = ""
     private let tabFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
     private var markedText = NSMutableAttributedString()
     private var markedSelection = NSRange(location: 0, length: 0)
@@ -1892,7 +1966,25 @@ final class TerminalTextView: NSView, NSTextInputClient {
         }
 
         terminalFontSize = clampedSize
-        terminalFont = NSFont.monospacedSystemFont(ofSize: clampedSize, weight: .regular)
+        terminalFont = configuredTerminalFont(family: terminalFontFamily, size: clampedSize)
+        onFontSizeChanged?(clampedSize)
+        needsDisplay = true
+        onGeometryChanged?()
+        return true
+    }
+
+    @discardableResult
+    func setTerminalFont(family: String, size: CGFloat) -> Bool {
+        let clampedSize = min(max(size, minTerminalFontSize), maxTerminalFontSize)
+        let normalizedFamily = family.trimmingCharacters(in: .whitespacesAndNewlines)
+        let changed = normalizedFamily != terminalFontFamily
+            || abs(clampedSize - terminalFontSize) > 0.01
+        guard changed else {
+            return false
+        }
+        terminalFontFamily = normalizedFamily
+        terminalFontSize = clampedSize
+        terminalFont = configuredTerminalFont(family: normalizedFamily, size: clampedSize)
         onFontSizeChanged?(clampedSize)
         needsDisplay = true
         onGeometryChanged?()
@@ -2588,6 +2680,20 @@ func clampedUInt16(_ value: Int) -> UInt16 {
     UInt16(min(max(value, 1), Int(UInt16.max)))
 }
 
+func configuredTerminalFont(family: String, size: CGFloat) -> NSFont {
+    let family = family.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !family.isEmpty,
+       let font = NSFontManager.shared.font(
+           withFamily: family,
+           traits: [],
+           weight: 5,
+           size: size
+       ) {
+        return font
+    }
+    return NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+}
+
 func themeAccentColor(_ theme: String?) -> NSColor {
     guard let theme else {
         return themeAccentColors["Graphite"] ?? NSColor.controlAccentColor
@@ -2726,6 +2832,13 @@ final class TerminalMetalView: MTKView, MTKViewDelegate {
         nvterm_skia_metal_forget_runtime(skiaRenderer, runtime)
     }
 
+    func setFontFamily(_ family: String) {
+        family.withCString { value in
+            _ = nvterm_skia_metal_set_font_family(skiaRenderer, value)
+        }
+        needsDisplay = true
+    }
+
     private func requestNextSkiaFrameIfNeeded(_ commandBuffer: MTLCommandBuffer) {
         let delayMs = nvterm_skia_metal_next_frame_delay_ms(skiaRenderer)
         guard delayMs != UInt64.max else {
@@ -2740,8 +2853,31 @@ final class TerminalMetalView: MTKView, MTKViewDelegate {
     }
 }
 
+struct NativePaneControlStatus {
+    let status: String
+    let summary: String
+    let revision: UInt64
+    let updatedAt: Date
+
+    var json: [String: Any] {
+        [
+            "status": status,
+            "summary": summary,
+            "revision": revision,
+            "updatedAt": updatedAt.timeIntervalSince1970,
+        ]
+    }
+}
+
+struct NativeStatusWaiter {
+    let token: UUID
+    let reply: NativeControlReply
+    let timeout: DispatchWorkItem
+}
+
 final class TerminalShellViewController: NSViewController, NSTabViewDelegate, TerminalContextMenuProvider {
     private let core: RustCore
+    private var settings: NativeSettings
     private let tabControl = NSSegmentedControl(frame: .zero)
     private let metalView: TerminalMetalView
     private let terminalTextView = TerminalTextView(frame: .zero)
@@ -2752,11 +2888,8 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     private var paneModes: [Int: NativePaneMode] = [:]
     private var paneTitles: [Int: String] = [:]
     private var lastSearchQuery = ""
-    private var optionAsAltEnabled = preferredBool(optionAsAltPreferenceKey, defaultValue: true)
-    private var notificationsEnabled = preferredBool(
-        notificationsPreferenceKey,
-        defaultValue: true
-    )
+    private var optionAsAltEnabled: Bool
+    private var notificationsEnabled: Bool
     private var pendingPaneWorkingDirectory: String?
     private var activePaneId: Int?
     private var lastSnapshot: TerminalCoreSnapshot?
@@ -2765,13 +2898,21 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     private var nvimFileTreeSmokeTarget = "none"
     private var paneWakeupSources: [Int: DispatchSourceRead] = [:]
     private var syncingTabs = false
+    private var controlSocketPath = ""
+    private var controlCliPath = ""
+    private var paneControlStatuses: [Int: NativePaneControlStatus] = [:]
+    private var paneStatusWaiters: [Int: [NativeStatusWaiter]] = [:]
+    private var nextStatusRevision: UInt64 = 1
 
-    init?(core: RustCore) {
+    init?(core: RustCore, settings: NativeSettings) {
         guard TerminalMetalView.isAvailable() else {
             NativeLog.runtimeError("metal_renderer_create_failed")
             return nil
         }
         self.core = core
+        self.settings = settings
+        self.optionAsAltEnabled = settings.optionAsAlt
+        self.notificationsEnabled = settings.notifications
         self.metalView = TerminalMetalView(frame: .zero)
         super.init(nibName: nil, bundle: nil)
         self.metalView.contextMenuProvider = self
@@ -2836,15 +2977,16 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             self?.resetZoom(nil)
         }
         self.terminalTextView.onFontSizeChanged = { size in
-            UserDefaults.standard.set(Double(size), forKey: fontSizePreferenceKey)
+            UserDefaults.standard.set(Double(size), forKey: NativePreferenceKey.fontSize)
         }
         self.metalView.renderProvider = { [weak self] texture, renderer in
             self?.renderActiveMetalFrame(texture: texture, renderer: renderer) ?? false
         }
-        let storedFontSize = UserDefaults.standard.double(forKey: fontSizePreferenceKey)
-        if storedFontSize > 0 {
-            _ = self.terminalTextView.setTerminalFontSize(CGFloat(storedFontSize))
-        }
+        _ = self.terminalTextView.setTerminalFont(
+            family: settings.fontFamily,
+            size: CGFloat(settings.fontSize)
+        )
+        self.metalView.setFontFamily(settings.fontFamily)
     }
 
     required init?(coder: NSCoder) {
@@ -2890,6 +3032,348 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         view.window?.makeFirstResponder(terminalTextView)
     }
 
+    func configureControl(socketPath: String, cliPath: String) {
+        controlSocketPath = socketPath
+        controlCliPath = cliPath
+    }
+
+    func applySettings(_ settings: NativeSettings) {
+        let previous = self.settings
+        self.settings = settings
+        optionAsAltEnabled = settings.optionAsAlt
+        notificationsEnabled = settings.notifications
+        for pane in terminalPanes.values {
+            (pane as? RustTerminalPane)?.setOptionAsAlt(settings.optionAsAlt)
+        }
+        if previous.fontFamily != settings.fontFamily
+            || previous.fontSize != settings.fontSize {
+            _ = terminalTextView.setTerminalFont(
+                family: settings.fontFamily,
+                size: CGFloat(settings.fontSize)
+            )
+            metalView.setFontFamily(settings.fontFamily)
+            resizeTerminalPanesToGrid()
+        }
+        if previous.defaultTheme != settings.defaultTheme {
+            core.setDefaultTheme(settings.defaultTheme)
+        }
+    }
+
+    func handleControlRequest(
+        _ request: NativeControlRequest,
+        reply: @escaping NativeControlReply
+    ) {
+        switch request.command {
+        case "list":
+            reply(.success(controlListResult()))
+        case "read-screen":
+            handleControlReadScreen(request, reply: reply)
+        case "send":
+            handleControlSend(request, reply: reply)
+        case "key":
+            handleControlKey(request, reply: reply)
+        case "status-set":
+            handleControlStatusSet(request, reply: reply)
+        case "status-wait":
+            handleControlStatusWait(request, reply: reply)
+        case "new-tab":
+            handleControlNewTab(request, reply: reply)
+        case "split":
+            handleControlSplit(request, reply: reply)
+        case "rename-tab":
+            handleControlRenameTab(request, reply: reply)
+        case "set-theme":
+            handleControlSetTheme(request, reply: reply)
+        default:
+            reply(controlFailure("unknown_command", "Unknown control command."))
+        }
+    }
+
+    private func controlListResult() -> [String: Any] {
+        guard let snapshot = core.snapshot() else {
+            return ["tabs": [], "panes": []]
+        }
+        let tabs: [[String: Any]] = snapshot.tabs.map { tab in
+            [
+                "id": tab.id,
+                "index": tab.index,
+                "title": tab.title,
+                "theme": tab.theme,
+                "active": tab.index == snapshot.active_tab,
+                "activePane": tab.active_pane,
+                "panes": tab.panes,
+            ]
+        }
+        let panes = snapshot.tabs.flatMap { tab in
+            tab.panes.map { paneId -> [String: Any] in
+                let pane = terminalPanes[paneId]
+                return [
+                    "id": paneId,
+                    "tab": tab.id,
+                    "kind": (pane?.kind ?? paneModes[paneId] ?? .terminal).sessionValue,
+                    "cwd": paneWorkingDirectories[paneId] ?? "",
+                    "title": paneTitles[paneId] ?? "",
+                    "kittyImages": pane?.controlImageCount() ?? 0,
+                    "status": (paneControlStatuses[paneId]?.json as Any?) ?? NSNull(),
+                ]
+            }
+        }
+        return [
+            "socket": controlSocketPath,
+            "activeTab": (
+                snapshot.tabs.first(where: { $0.index == snapshot.active_tab })?.id as Any?
+            ) ?? NSNull(),
+            "tabs": tabs,
+            "panes": panes,
+        ]
+    }
+
+    private func handleControlReadScreen(
+        _ request: NativeControlRequest,
+        reply: @escaping NativeControlReply
+    ) {
+        guard let paneId = request.pane, let pane = controlPane(paneId) else {
+            reply(controlFailure("pane_not_found", "The requested pane does not exist."))
+            return
+        }
+        _ = pane.drain()
+        reply(.success(["pane": paneId, "text": pane.controlScreenText()]))
+    }
+
+    private func handleControlSend(
+        _ request: NativeControlRequest,
+        reply: @escaping NativeControlReply
+    ) {
+        guard let paneId = request.pane,
+              let text = request.text,
+              let pane = controlPane(paneId)
+        else {
+            reply(controlFailure("invalid_send", "A valid pane and text are required."))
+            return
+        }
+        pane.write(Data(text.utf8))
+        reply(.success(["pane": paneId, "bytes": text.utf8.count]))
+    }
+
+    private func handleControlKey(
+        _ request: NativeControlRequest,
+        reply: @escaping NativeControlReply
+    ) {
+        guard let paneId = request.pane,
+              let key = request.key,
+              let pane = controlPane(paneId),
+              let data = controlKeyData(key)
+        else {
+            reply(controlFailure("invalid_key", "The pane or key name is invalid."))
+            return
+        }
+        pane.write(data)
+        reply(.success(["pane": paneId, "key": key]))
+    }
+
+    private func handleControlStatusSet(
+        _ request: NativeControlRequest,
+        reply: @escaping NativeControlReply
+    ) {
+        let allowed = ["idle", "running", "waiting", "done", "failed", "blocked"]
+        guard let paneId = request.pane,
+              controlPaneExists(paneId),
+              let status = request.status?.lowercased(),
+              allowed.contains(status)
+        else {
+            reply(controlFailure("invalid_status", "The pane or status value is invalid."))
+            return
+        }
+        let value = NativePaneControlStatus(
+            status: status,
+            summary: request.summary ?? "",
+            revision: nextStatusRevision,
+            updatedAt: Date()
+        )
+        if nextStatusRevision < UInt64.max {
+            nextStatusRevision += 1
+        }
+        paneControlStatuses[paneId] = value
+        let waiters = paneStatusWaiters.removeValue(forKey: paneId) ?? []
+        for waiter in waiters {
+            waiter.timeout.cancel()
+            waiter.reply(.success(value.json))
+        }
+        reply(.success(value.json))
+    }
+
+    private func handleControlStatusWait(
+        _ request: NativeControlRequest,
+        reply: @escaping NativeControlReply
+    ) {
+        guard let paneId = request.pane, controlPaneExists(paneId) else {
+            reply(controlFailure("pane_not_found", "The requested pane does not exist."))
+            return
+        }
+        if let current = paneControlStatuses[paneId],
+           ["done", "failed", "blocked"].contains(current.status) {
+            reply(.success(current.json))
+            return
+        }
+        let token = UUID()
+        let timeout = DispatchWorkItem { [weak self] in
+            self?.timeoutStatusWait(paneId: paneId, token: token)
+        }
+        let waiter = NativeStatusWaiter(token: token, reply: reply, timeout: timeout)
+        paneStatusWaiters[paneId, default: []].append(waiter)
+        let milliseconds = min(request.timeout_ms ?? 60_000, 3_600_000)
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .milliseconds(Int(milliseconds)),
+            execute: timeout
+        )
+    }
+
+    private func timeoutStatusWait(paneId: Int, token: UUID) {
+        guard var waiters = paneStatusWaiters[paneId],
+              let index = waiters.firstIndex(where: { $0.token == token })
+        else {
+            return
+        }
+        let waiter = waiters.remove(at: index)
+        paneStatusWaiters[paneId] = waiters.isEmpty ? nil : waiters
+        waiter.reply(controlFailure("wait_timeout", "No pane status update was received."))
+    }
+
+    private func removeControlState(_ paneId: Int) {
+        paneControlStatuses.removeValue(forKey: paneId)
+        let waiters = paneStatusWaiters.removeValue(forKey: paneId) ?? []
+        for waiter in waiters {
+            waiter.timeout.cancel()
+            waiter.reply(controlFailure("pane_closed", "The pane was closed."))
+        }
+    }
+
+    private func handleControlNewTab(
+        _ request: NativeControlRequest,
+        reply: @escaping NativeControlReply
+    ) {
+        guard let cwd = validatedControlDirectory(request.cwd) else {
+            reply(controlFailure("invalid_cwd", "The working directory is invalid."))
+            return
+        }
+        pendingPaneWorkingDirectory = cwd
+        let index = core.newTab()
+        syncFromCore()
+        guard let tab = lastSnapshot?.tabs.first(where: { $0.index == index }) else {
+            reply(controlFailure("core_error", "The new tab was not created."))
+            return
+        }
+        reply(.success(["tab": tab.id, "pane": tab.active_pane]))
+    }
+
+    private func handleControlSplit(
+        _ request: NativeControlRequest,
+        reply: @escaping NativeControlReply
+    ) {
+        guard let paneId = request.pane,
+              let tab = lastSnapshot?.tabs.first(where: { $0.panes.contains(paneId) }),
+              let cwd = validatedControlDirectory(request.cwd),
+              let axisName = request.axis
+        else {
+            reply(controlFailure("invalid_split", "The pane, axis, or directory is invalid."))
+            return
+        }
+        _ = core.selectTab(tab.index)
+        _ = core.selectPane(paneId)
+        pendingPaneWorkingDirectory = request.cwd == nil ? activeWorkingDirectory() : cwd
+        let axis = axisName == "horizontal" ? ffiSplitHorizontal : ffiSplitVertical
+        guard let newPane = core.splitActive(axis: axis) else {
+            reply(controlFailure("core_error", "The pane could not be split."))
+            return
+        }
+        syncFromCore()
+        reply(.success(["tab": tab.id, "pane": newPane]))
+    }
+
+    private func handleControlRenameTab(
+        _ request: NativeControlRequest,
+        reply: @escaping NativeControlReply
+    ) {
+        guard let tabId = request.tab,
+              let title = request.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty,
+              let tab = lastSnapshot?.tabs.first(where: { $0.id == tabId })
+        else {
+            reply(controlFailure("invalid_tab", "The tab or title is invalid."))
+            return
+        }
+        core.renameTab(tab.index, title: title)
+        syncFromCore()
+        reply(.success(["tab": tabId, "title": title]))
+    }
+
+    private func handleControlSetTheme(
+        _ request: NativeControlRequest,
+        reply: @escaping NativeControlReply
+    ) {
+        guard let tabId = request.tab,
+              let theme = request.theme,
+              nativeThemeNames.contains(theme),
+              let tab = lastSnapshot?.tabs.first(where: { $0.id == tabId })
+        else {
+            reply(controlFailure("invalid_theme", "The tab or theme is invalid."))
+            return
+        }
+        core.setTheme(theme, tab: tab.index)
+        syncFromCore()
+        reply(.success(["tab": tabId, "theme": theme]))
+    }
+
+    private func controlPane(_ paneId: Int) -> NativePane? {
+        guard controlPaneExists(paneId) else {
+            return nil
+        }
+        return terminalPane(for: paneId)
+    }
+
+    private func controlPaneExists(_ paneId: Int) -> Bool {
+        lastSnapshot?.tabs.contains(where: { $0.panes.contains(paneId) }) == true
+    }
+
+    private func validatedControlDirectory(_ requested: String?) -> String? {
+        let value = requested ?? newPaneWorkingDirectory()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: value, isDirectory: &isDirectory),
+              isDirectory.boolValue
+        else {
+            return nil
+        }
+        return URL(fileURLWithPath: value).standardizedFileURL.path
+    }
+
+    private func controlFailure(_ code: String, _ message: String) -> Result<Any, NativeControlFailure> {
+        .failure(NativeControlFailure(code: code, message: message))
+    }
+
+    private func controlKeyData(_ key: String) -> Data? {
+        let normalized = key.lowercased()
+        let named: [String: [UInt8]] = [
+            "enter": [13], "return": [13], "tab": [9], "escape": [27],
+            "esc": [27], "backspace": [127], "space": [32],
+            "up": [27, 91, 65], "down": [27, 91, 66],
+            "right": [27, 91, 67], "left": [27, 91, 68],
+            "home": [27, 91, 72], "end": [27, 91, 70],
+            "delete": [27, 91, 51, 126], "pageup": [27, 91, 53, 126],
+            "pagedown": [27, 91, 54, 126],
+        ]
+        if let bytes = named[normalized] {
+            return Data(bytes)
+        }
+        if normalized.hasPrefix("ctrl+"),
+           let scalar = normalized.dropFirst(5).unicodeScalars.first,
+           normalized.dropFirst(5).unicodeScalars.count == 1,
+           scalar.value >= 97,
+           scalar.value <= 122 {
+            return Data([UInt8(scalar.value - 96)])
+        }
+        return key.count == 1 ? Data(key.utf8) : nil
+    }
+
     @objc func tabControlChanged(_ sender: NSSegmentedControl) {
         guard !syncingTabs, sender.selectedSegment >= 0 else {
             return
@@ -2899,19 +3383,19 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     @objc func newTab(_ sender: Any?) {
-        pendingPaneWorkingDirectory = activeWorkingDirectory()
+        pendingPaneWorkingDirectory = newPaneWorkingDirectory()
         core.newTab()
         syncFromCore()
     }
 
     @objc func splitVertical(_ sender: Any?) {
-        pendingPaneWorkingDirectory = activeWorkingDirectory()
+        pendingPaneWorkingDirectory = newPaneWorkingDirectory()
         _ = core.splitActive(axis: ffiSplitVertical)
         syncFromCore()
     }
 
     @objc func splitHorizontal(_ sender: Any?) {
-        pendingPaneWorkingDirectory = activeWorkingDirectory()
+        pendingPaneWorkingDirectory = newPaneWorkingDirectory()
         _ = core.splitActive(axis: ffiSplitHorizontal)
         syncFromCore()
     }
@@ -2927,6 +3411,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         guard let paneId = activePaneId, core.closePane(paneId) else {
             return
         }
+        removeControlState(paneId)
         removePaneRuntime(paneId)
         scrollRemainders.removeValue(forKey: paneId)
         paneWorkingDirectories.removeValue(forKey: paneId)
@@ -2941,7 +3426,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
     @objc func toggleOptionAsAlt(_ sender: Any?) {
         optionAsAltEnabled.toggle()
-        UserDefaults.standard.set(optionAsAltEnabled, forKey: optionAsAltPreferenceKey)
+        UserDefaults.standard.set(optionAsAltEnabled, forKey: NativePreferenceKey.optionAsAlt)
         for pane in terminalPanes.values {
             (pane as? RustTerminalPane)?.setOptionAsAlt(optionAsAltEnabled)
         }
@@ -2949,26 +3434,26 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 
     @objc func toggleNotifications(_ sender: Any?) {
         notificationsEnabled.toggle()
-        UserDefaults.standard.set(notificationsEnabled, forKey: notificationsPreferenceKey)
+        UserDefaults.standard.set(notificationsEnabled, forKey: NativePreferenceKey.notifications)
     }
 
     @objc func toggleSessionRestore(_ sender: Any?) {
-        let enabled = !preferredBool(sessionRestorePreferenceKey, defaultValue: true)
-        UserDefaults.standard.set(enabled, forKey: sessionRestorePreferenceKey)
+        let enabled = !preferredBool(NativePreferenceKey.sessionRestore, defaultValue: true)
+        UserDefaults.standard.set(enabled, forKey: NativePreferenceKey.sessionRestore)
         if !enabled {
-            UserDefaults.standard.removeObject(forKey: sessionStatePreferenceKey)
+            UserDefaults.standard.removeObject(forKey: NativePreferenceKey.sessionState)
         }
     }
 
     func saveSessionState() {
-        guard preferredBool(sessionRestorePreferenceKey, defaultValue: true),
+        guard preferredBool(NativePreferenceKey.sessionRestore, defaultValue: true),
               let state = currentSessionState()
         else {
             return
         }
         do {
             let data = try JSONEncoder().encode(state)
-            UserDefaults.standard.set(data, forKey: sessionStatePreferenceKey)
+            UserDefaults.standard.set(data, forKey: NativePreferenceKey.sessionState)
         } catch {
             NativeLog.sessionWarning("session_encode_failed error=\(error)")
         }
@@ -4706,7 +5191,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     private func themeMenuItem() -> NSMenuItem {
         let item = NSMenuItem(title: "Color Theme", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
-        for theme in themes {
+        for theme in nativeThemeNames {
             let themeItem = menuItem(theme, #selector(setThemeFromMenu(_:)))
             themeItem.representedObject = theme
             themeItem.image = colorSwatchImage(themeAccentColor(theme))
@@ -4786,7 +5271,12 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
             ?? nativeWorkingDirectory()
         pendingPaneWorkingDirectory = nil
         let mode = paneModes[paneId] ?? defaultPaneMode
-        guard let pane = makePane(grid: paneGridSize(paneId), cwd: cwd, mode: mode) else {
+        guard let pane = makePane(
+            paneId: paneId,
+            grid: paneGridSize(paneId),
+            cwd: cwd,
+            mode: mode
+        ) else {
             return nil
         }
         terminalPanes[paneId] = pane
@@ -4804,16 +5294,43 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     private func makePane(
+        paneId: Int,
         grid: (rows: Int, cols: Int, widthPixels: Int, heightPixels: Int),
         cwd: String,
         mode: NativePaneMode
     ) -> NativePane? {
         switch mode {
         case .terminal:
-            return RustTerminalPane(grid: grid, cwd: cwd)
+            return RustTerminalPane(
+                grid: grid,
+                cwd: cwd,
+                shell: settings.shellPath,
+                environment: controlEnvironment(paneId: paneId)
+            )
         case .neovim:
             return RustNeovimPane(grid: grid, cwd: cwd)
         }
+    }
+
+    private func controlEnvironment(paneId: Int) -> [String: String] {
+        guard !controlSocketPath.isEmpty else {
+            return [:]
+        }
+        let tabId = lastSnapshot?.tabs.first(where: { $0.panes.contains(paneId) })?.id ?? 0
+        var environment = [
+            "NVTERM_SOCKET": controlSocketPath,
+            "NVTERM_TAB_ID": String(tabId),
+            "NVTERM_PANE_ID": String(paneId),
+        ]
+        if !controlCliPath.isEmpty {
+            environment["NVTERMCTL"] = controlCliPath
+            let cliDirectory = URL(fileURLWithPath: controlCliPath)
+                .deletingLastPathComponent()
+                .path
+            let inheritedPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+            environment["PATH"] = "\(cliDirectory):\(inheritedPath)"
+        }
+        return environment
     }
 
     private func resizeTerminalPanesToGrid() {
@@ -5014,11 +5531,17 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         return cwd
     }
 
+    private func newPaneWorkingDirectory() -> String {
+        settings.startupDirectory.isEmpty
+            ? activeWorkingDirectory()
+            : nativeWorkingDirectory()
+    }
+
     private func restoreSessionIfNeeded() {
         let environment = ProcessInfo.processInfo.environment
         guard environment["NVTERM_NATIVE_SMOKE_SCENARIO"] == nil,
-              preferredBool(sessionRestorePreferenceKey, defaultValue: true),
-              let data = UserDefaults.standard.data(forKey: sessionStatePreferenceKey)
+              preferredBool(NativePreferenceKey.sessionRestore, defaultValue: true),
+              let data = UserDefaults.standard.data(forKey: NativePreferenceKey.sessionState)
         else {
             return
         }
@@ -5029,7 +5552,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         }
         guard let state = decodeSessionState(data), !state.tabs.isEmpty else {
             NativeLog.sessionWarning("session_decode_failed state_removed=true")
-            UserDefaults.standard.removeObject(forKey: sessionStatePreferenceKey)
+            UserDefaults.standard.removeObject(forKey: NativePreferenceKey.sessionState)
             return
         }
         for (index, saved) in state.tabs.enumerated() {
@@ -5169,7 +5692,14 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     }
 
     private func nativeWorkingDirectory() -> String {
-        FileManager.default.currentDirectoryPath
+        let configured = settings.startupDirectory
+        var isDirectory: ObjCBool = false
+        if !configured.isEmpty,
+           FileManager.default.fileExists(atPath: configured, isDirectory: &isDirectory),
+           isDirectory.boolValue {
+            return configured
+        }
+        return FileManager.default.currentDirectoryPath
     }
 
     private func neovimChangeDirectoryCommand(_ directory: String) -> String {
@@ -5242,6 +5772,7 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
     private func closeExitedTerminalPanes(_ paneIds: [Int]) -> Bool {
         var closed = false
         for paneId in paneIds {
+            removeControlState(paneId)
             removePaneRuntime(paneId)
             scrollRemainders.removeValue(forKey: paneId)
             paneWorkingDirectories.removeValue(forKey: paneId)
@@ -5264,7 +5795,9 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
         let cwd = paneWorkingDirectories[paneId] ?? nativeWorkingDirectory()
         guard let pane = RustTerminalPane(
             grid: paneGridSize(paneId),
-            cwd: cwd
+            cwd: cwd,
+            shell: settings.shellPath,
+            environment: controlEnvironment(paneId: paneId)
         ) else {
             removePaneRuntime(paneId)
             return
@@ -5381,6 +5914,9 @@ final class TerminalShellViewController: NSViewController, NSTabViewDelegate, Te
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private var shellController: TerminalShellViewController?
+    private let settingsStore = NativeSettingsStore()
+    private var settingsWindowController: NativeSettingsWindowController?
+    private var controlServer: NativeControlServer?
     private let updateChecker = AppUpdateChecker()
     private let updateInstaller = AppUpdateInstaller()
     private var updateCheckID: UUID?
@@ -5389,7 +5925,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NativeLog.started()
-        guard let core = RustCore() else {
+        let settings = settingsStore.load()
+        guard let core = RustCore(defaultTheme: settings.defaultTheme) else {
             presentFatalError(
                 title: "Terminal Core Failed",
                 message: "The Rust terminal core could not be initialized. Check Console for details."
@@ -5397,13 +5934,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        guard let controller = TerminalShellViewController(core: core) else {
+        guard let controller = TerminalShellViewController(core: core, settings: settings) else {
             presentFatalError(
                 title: "Metal Renderer Unavailable",
                 message: "A Metal-capable GPU and the bundled Skia renderer are required."
             )
             return
         }
+        let socketPath = NativeControlEnvironment.socketPath()
+        guard let controlServer = NativeControlServer(socketPath: socketPath) else {
+            presentFatalError(
+                title: "Control Server Failed",
+                message: "The owner-only Unix control socket could not be created."
+            )
+            return
+        }
+        controller.configureControl(
+            socketPath: socketPath,
+            cliPath: NativeControlEnvironment.cliPath()
+        )
+        controlServer.onRequest = { [weak controller] request, reply in
+            controller?.handleControlRequest(request, reply: reply)
+        }
+        self.controlServer = controlServer
         let contentRect = NSRect(x: 0, y: 0, width: 1100, height: 720)
         let window = NSWindow(
             contentRect: contentRect,
@@ -5419,6 +5972,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         self.window = window
         self.shellController = controller
+        let settingsController = NativeSettingsWindowController(store: settingsStore)
+        settingsController.onChange = { [weak self] settings in
+            self?.shellController?.applySettings(settings)
+            self?.buildMainMenu()
+        }
+        self.settingsWindowController = settingsController
 
         buildMainMenu()
         applySmokeScenarioIfNeeded(controller)
@@ -5474,19 +6033,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         shellController?.closeActivePane(sender)
     }
 
-    @objc func toggleOptionAsAlt(_ sender: NSMenuItem) {
-        shellController?.toggleOptionAsAlt(sender)
-        sender.state = sender.state == .on ? .off : .on
-    }
-
-    @objc func toggleNotifications(_ sender: NSMenuItem) {
-        shellController?.toggleNotifications(sender)
-        sender.state = sender.state == .on ? .off : .on
-    }
-
-    @objc func toggleSessionRestore(_ sender: NSMenuItem) {
-        shellController?.toggleSessionRestore(sender)
-        sender.state = sender.state == .on ? .off : .on
+    @objc func showSettings(_ sender: Any?) {
+        settingsWindowController?.present()
     }
 
     @objc func zoomIn(_ sender: Any?) {
@@ -5511,6 +6059,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func scheduleAutomaticUpdateCheck() {
         guard ProcessInfo.processInfo.environment["NVTERM_NATIVE_SMOKE_SCENARIO"] == nil else {
+            return
+        }
+        guard settingsStore.shouldAutomaticallyCheckForUpdates() else {
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
@@ -5543,6 +6094,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 self.updateCheckID = nil
                 self.updateTask = nil
+                self.settingsStore.recordUpdateCheck()
                 switch result {
                 case .success(.current):
                     NativeLog.lifecycleInfo("update_check_current version=\(currentVersion)")
@@ -5680,7 +6232,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(editMenuItem())
         mainMenu.addItem(viewMenuItem())
         mainMenu.addItem(sessionMenuItem())
-        mainMenu.addItem(settingsMenuItem())
         mainMenu.addItem(helpMenuItem())
         NSApp.mainMenu = mainMenu
     }
@@ -5688,6 +6239,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func applySmokeScenarioIfNeeded(_ controller: TerminalShellViewController) {
         let environment = ProcessInfo.processInfo.environment
         switch environment["NVTERM_NATIVE_SMOKE_SCENARIO"] {
+        case "settings":
+            settingsWindowController?.present()
         case "1":
             controller.applySmokeScenario(resultPath: environment["NVTERM_NATIVE_SMOKE_RESULT"])
         case "terminal-vim-scroll":
@@ -5788,10 +6341,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let path = environment["NVTERM_NATIVE_SMOKE_SHOT"], !path.isEmpty else {
             return
         }
+        let targetWindow = environment["NVTERM_NATIVE_SMOKE_SCENARIO"] == "settings"
+            ? settingsWindowController?.window ?? window
+            : window
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak window] in
-            if let window {
-                self.writeSmokeShot(path: path, window: window)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak targetWindow] in
+            if let targetWindow {
+                self.writeSmokeShot(path: path, window: targetWindow)
             }
             NSApp.terminate(nil)
         }
@@ -5802,10 +6358,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let path = environment["NVTERM_NATIVE_SMOKE_WINDOW_ID"], !path.isEmpty else {
             return
         }
-        writeSmokeWindowId(path: path, window: window, attempts: 20)
+        let targetWindow = environment["NVTERM_NATIVE_SMOKE_SCENARIO"] == "settings"
+            ? settingsWindowController?.window ?? window
+            : window
+        writeSmokeWindowId(path: path, window: targetWindow, attempts: 20)
     }
 
     private func writeSmokeWindowId(path: String, window: NSWindow, attempts: Int) {
+        if window.windowNumber > 0 {
+            try? "\(window.windowNumber)\n".write(
+                toFile: path,
+                atomically: true,
+                encoding: .utf8
+            )
+            return
+        }
         if let windowId = cgWindowNumberForCurrentProcess() {
             try? "\(windowId)\n".write(
                 toFile: path,
@@ -5911,6 +6478,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: ""
         )
         menu.addItem(NSMenuItem.separator())
+        let settingsItem = NSMenuItem(
+            title: "Settings…",
+            action: #selector(showSettings(_:)),
+            keyEquivalent: ","
+        )
+        settingsItem.target = self
+        settingsItem.keyEquivalentModifierMask = [.command]
+        menu.addItem(settingsItem)
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(
             withTitle: "Quit Neovide Tabs",
             action: #selector(NSApplication.terminate(_:)),
@@ -5923,10 +6499,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func sessionMenuItem() -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Session")
-        menu.addItem(targetedItem("New Tab", #selector(newTab(_:)), "t"))
-        menu.addItem(targetedItem("Split Vertical", #selector(splitVertical(_:)), "d"))
-        menu.addItem(targetedItem("Split Horizontal", #selector(splitHorizontal(_:)), "D"))
-        menu.addItem(targetedItem("Close Pane", #selector(closeActivePane(_:)), "w"))
+        menu.addItem(commandItem("New Tab", #selector(newTab(_:)), .newTab))
+        menu.addItem(commandItem("Split Vertical", #selector(splitVertical(_:)), .splitVertical))
+        menu.addItem(commandItem("Split Horizontal", #selector(splitHorizontal(_:)), .splitHorizontal))
+        menu.addItem(commandItem("Close Pane", #selector(closeActivePane(_:)), .closePane))
         menu.addItem(NSMenuItem.separator())
         for shortcutNumber in 1...9 {
             let title = shortcutNumber == 9 ? "Select Last Tab" : "Select Tab \(shortcutNumber)"
@@ -5935,8 +6511,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(menuItem)
         }
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(targetedItem("Rename Session", #selector(renameActiveTab(_:)), "r"))
-        menu.addItem(targetedItem("Open Native Neovim", #selector(openNativeNeovim(_:)), "n"))
+        menu.addItem(commandItem("Rename Session", #selector(renameActiveTab(_:)), .renameSession))
+        menu.addItem(
+            commandItem(
+                "Open Native Neovim",
+                #selector(openNativeNeovim(_:)),
+                .openNativeNeovim
+            )
+        )
         item.submenu = menu
         return item
     }
@@ -5960,37 +6542,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func viewMenuItem() -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "View")
-        menu.addItem(targetedItem("Zoom In", #selector(zoomIn(_:)), "+"))
-        menu.addItem(targetedItem("Zoom Out", #selector(zoomOut(_:)), "-"))
-        menu.addItem(targetedItem("Actual Size", #selector(resetZoom(_:)), "0"))
-        item.submenu = menu
-        return item
-    }
-
-    private func settingsMenuItem() -> NSMenuItem {
-        let item = NSMenuItem()
-        let menu = NSMenu(title: "Settings")
-        menu.addItem(
-            toggleItem(
-                "Use Option as Alt",
-                #selector(toggleOptionAsAlt(_:)),
-                enabled: preferredBool(optionAsAltPreferenceKey, defaultValue: true)
-            )
-        )
-        menu.addItem(
-            toggleItem(
-                "Bell Notifications",
-                #selector(toggleNotifications(_:)),
-                enabled: preferredBool(notificationsPreferenceKey, defaultValue: true)
-            )
-        )
-        menu.addItem(
-            toggleItem(
-                "Restore Sessions",
-                #selector(toggleSessionRestore(_:)),
-                enabled: preferredBool(sessionRestorePreferenceKey, defaultValue: true)
-            )
-        )
+        menu.addItem(commandItem("Zoom In", #selector(zoomIn(_:)), .zoomIn))
+        menu.addItem(commandItem("Zoom Out", #selector(zoomOut(_:)), .zoomOut))
+        menu.addItem(commandItem("Actual Size", #selector(resetZoom(_:)), .actualSize))
         item.submenu = menu
         return item
     }
@@ -5998,19 +6552,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func helpMenuItem() -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Help")
-        menu.addItem(targetedItem("Check for Updates…", #selector(checkForUpdates(_:)), ""))
+        menu.addItem(
+            commandItem(
+                "Check for Updates…",
+                #selector(checkForUpdates(_:)),
+                .checkForUpdates
+            )
+        )
         item.submenu = menu
         return item
     }
 
-    private func toggleItem(
+    private func commandItem(
         _ title: String,
         _ action: Selector,
-        enabled: Bool
+        _ command: NativeCommandID
     ) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        let shortcut = settingsStore.load().shortcut(for: command)
+        let item = NSMenuItem(
+            title: title,
+            action: action,
+            keyEquivalent: shortcut.keyEquivalent
+        )
         item.target = self
-        item.state = enabled ? .on : .off
+        item.keyEquivalentModifierMask = shortcut.modifiers
         return item
     }
 
@@ -6035,7 +6600,9 @@ struct NeovideTabsApplication {
             return
         }
         if ProcessInfo.processInfo.environment["NVTERM_UPDATE_SELF_TEST"] == "1" {
-            if !AppUpdateChecker.runSelfTests() || !AppUpdateInstaller.runSelfTests() {
+            if !AppUpdateChecker.runSelfTests()
+                || !AppUpdateInstaller.runSelfTests()
+                || !NativeSettingsStore.runSelfTests() {
                 fatalError("update self-test failed")
             }
             print("update self-test passed")

@@ -65,6 +65,18 @@ native-update-install-smoke:
 native-update-release-smoke:
     @./scripts/native-update-release-smoke
 
+# Verify the native Settings window renders and its model self-tests pass.
+native-settings-smoke:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-settings-smoke; else just native-build && ./scripts/native-settings-smoke; fi
+
+# Verify the owner-only control socket and every nvtermctl command end to end.
+native-control-smoke:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-control-smoke; else just native-build && ./scripts/native-control-smoke; fi
+
+# Verify Kitty temp-file transfer, pane isolation, deletion, and Skia rendering.
+native-kitty-smoke:
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-kitty-smoke; else just native-build && ./scripts/native-kitty-smoke; fi
+
 # Build, launch briefly, capture the native shell view, and exit.
 native-smoke:
     @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just native-smoke; else just native-build && ./scripts/native-smoke; fi
@@ -317,7 +329,7 @@ secrets:
 
 # Lint release/smoke shell scripts and GitHub Actions workflows.
 ops-lint:
-    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just ops-lint; else shellcheck scripts/apply-update scripts/native-build scripts/native-package scripts/native-package-smoke scripts/native-notarize scripts/native-release scripts/native-resize-smoke scripts/native-session-smoke scripts/native-smoke scripts/native-soak scripts/native-update-install-smoke scripts/native-update-release-smoke && actionlint .github/workflows/*.yml; fi
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just ops-lint; else shellcheck scripts/apply-update scripts/native-build scripts/native-control-smoke scripts/native-kitty-smoke scripts/native-package scripts/native-package-smoke scripts/native-notarize scripts/native-release scripts/native-resize-smoke scripts/native-session-smoke scripts/native-settings-smoke scripts/native-smoke scripts/native-soak scripts/native-update-install-smoke scripts/native-update-release-smoke && actionlint .github/workflows/*.yml; fi
 
 # Configure this clone to use the repository-managed Git hooks.
 install-hooks:

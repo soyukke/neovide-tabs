@@ -58,6 +58,10 @@ impl NeovideTextRenderer {
             .update_grid(font_size(geometry), geometry.cell_width);
     }
 
+    pub fn set_primary_font_family(&mut self, family: Option<&str>) {
+        self.shaper.set_primary_font_family(family);
+    }
+
     pub fn draw_line(
         &mut self,
         canvas: &Canvas,
@@ -298,6 +302,7 @@ fn token(cell_index: usize, offset: usize, character: char) -> Token {
 }
 
 struct CachingShaper {
+    primary_font_family: Option<String>,
     primary_font_path: Option<String>,
     font_loader: FontLoader,
     blob_cache: LruCache<ShapeKey, Vec<TextBlob>>,
@@ -311,6 +316,7 @@ impl CachingShaper {
     fn new() -> Self {
         let font_size = 14.0;
         Self {
+            primary_font_family: None,
             primary_font_path: env::var("NVTERM_FONT").ok(),
             font_loader: FontLoader::new(font_size),
             blob_cache: LruCache::new(NonZeroUsize::new(SHAPE_CACHE_ENTRIES).unwrap()),
@@ -327,6 +333,18 @@ impl CachingShaper {
         }
         self.font_size = font_size;
         self.cell_width = cell_width;
+        self.reset_font_loader();
+    }
+
+    fn set_primary_font_family(&mut self, family: Option<&str>) {
+        let family = family
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        if self.primary_font_family == family {
+            return;
+        }
+        self.primary_font_family = family;
         self.reset_font_loader();
     }
 
@@ -483,6 +501,12 @@ impl CachingShaper {
 
     fn primary_font_keys(&self, style: CoarseStyle) -> Vec<FontKey> {
         let mut keys = Vec::new();
+        if let Some(family) = &self.primary_font_family {
+            keys.push(FontKey::Family {
+                family: family.clone(),
+                style,
+            });
+        }
         if let Some(path) = &self.primary_font_path {
             keys.push(FontKey::Path(path.clone()));
         }

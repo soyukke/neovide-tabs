@@ -17,6 +17,7 @@ allowed to differ from the target design during a migration.
 - [0007: Vendor Neovide rendering assets for native Neovim quality](0007-vendor-neovide-rendering-assets.md)
 - [0008: Complete the native terminal interaction and pane model](0008-complete-native-terminal-interaction-and-pane-model.md)
 - [0009: Harden the native runtime and release pipeline](0009-harden-native-runtime-and-release-pipeline.md)
+- [0010: Use native settings and an owner-only control API](0010-use-native-settings-and-an-owner-only-control-api.md)
 
 ## Workflow
 

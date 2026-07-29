@@ -8,6 +8,9 @@ def main() -> int:
     path = sys.argv[1] if len(sys.argv) > 1 else "spikes/macos-shell/.build/native-smoke.png"
     mode = sys.argv[2] if len(sys.argv) > 2 else "terminal"
     width, height, pixels = read_png_rgba(path)
+    if mode == "kitty":
+        verify_kitty(width, height, pixels)
+        return 0
     if mode == "nvim-shaped-text-visual":
         result_path = sys.argv[3] if len(sys.argv) > 3 else ""
         verify_shaped_text_visual(width, height, pixels, result_path)
@@ -75,6 +78,28 @@ def main() -> int:
         f"dark_surface={dark_surface} terminal_text={terminal_text}"
     )
     return 0
+
+
+def verify_kitty(width: int, height: int, pixels) -> None:
+    saturated = 0
+    dark_surface = 0
+    for y in range(height // 8, height):
+        for x in range(width):
+            r, g, b, a = pixels[y][x]
+            if a > 200 and max(r, g, b) > 150 and max(r, g, b) - min(r, g, b) > 80:
+                saturated += 1
+            if a > 200 and r < 35 and g < 40 and b < 50:
+                dark_surface += 1
+    if width < 800 or height < 500:
+        raise SystemExit(f"kitty smoke image is too small: {width}x{height}")
+    if dark_surface < 100_000:
+        raise SystemExit(f"kitty smoke terminal surface missing: dark={dark_surface}")
+    if saturated < 2_000:
+        raise SystemExit(f"kitty smoke image pixels missing: saturated={saturated}")
+    print(
+        f"native kitty smoke verified: {width}x{height} "
+        f"dark_surface={dark_surface} saturated={saturated}"
+    )
 
 
 def verify_nvim_skia(width: int, height: int, pixels, result_path: str) -> None:

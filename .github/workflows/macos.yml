@@ -41,6 +41,9 @@ jobs:
       - name: Run native smoke
         run: |
           nix develop --command just native-smoke
+          nix develop --command just native-settings-smoke
+          nix develop --command just native-control-smoke
+          nix develop --command just native-kitty-smoke
           nix develop --command just native-package-smoke
 
       - name: Run lifecycle, resize, and session smokes
