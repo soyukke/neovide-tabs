@@ -8,13 +8,17 @@ fi
 app="${NVTERM_NATIVE_EXECUTABLE:-spikes/macos-shell/.build/NativeShellSpike}"
 cli="${NVTERM_CONTROL_EXECUTABLE:-target/debug/nvtermctl}"
 cli="$(cd "$(dirname "$cli")" && pwd)/$(basename "$cli")"
+app_arguments=()
+if [[ -n "${NVTERM_CONTROL_SMOKE_SHELL:-}" ]]; then
+  app_arguments=(-shellPath "$NVTERM_CONTROL_SMOKE_SHELL")
+fi
 smoke_root="$(mktemp -d "${TMPDIR:-/tmp}/neovide-tabs-control-smoke.XXXXXX")"
 socket="$smoke_root/control.sock"
 app_log="$smoke_root/app.log"
 
 NVTERM_CONTROL_SOCKET="$socket" \
   NVTERM_NATIVE_SMOKE_SCENARIO=control \
-  "$app" >"$app_log" 2>&1 &
+  "$app" "${app_arguments[@]}" >"$app_log" 2>&1 &
 app_pid=$!
 
 cleanup() {
@@ -46,17 +50,17 @@ list="$("$cli" --socket "$socket" --json list)"
 jq -e '.ok and .result.activeTab == 1 and (.result.panes | length) == 1' <<<"$list" >/dev/null
 
 "$cli" --socket "$socket" send --pane 1 \
-  "if [ \"\$NVTERM_TAB_ID:\$NVTERM_PANE_ID:\$NVTERM_SOCKET:\$NVTERMCTL\" = \"1:1:$socket:$cli\" ] && [ \"\$(command -v nvtermctl)\" = \"\$NVTERMCTL\" ]; then echo CONTROL_READY:OK; else echo CONTROL_READY:BAD; fi" \
+  "resolved_nvtermctl=\$(command -v nvtermctl 2>/dev/null || true); printf 'CONTROL_ENV:%s:%s:%s:%s:%s\\n' \"\$NVTERM_TAB_ID\" \"\$NVTERM_PANE_ID\" \"\$NVTERM_SOCKET\" \"\$NVTERMCTL\" \"\$resolved_nvtermctl\"; if [ \"\$NVTERM_TAB_ID:\$NVTERM_PANE_ID:\$NVTERM_SOCKET:\$NVTERMCTL\" = \"1:1:$socket:$cli\" ] && [ \"\$resolved_nvtermctl\" = \"\$NVTERMCTL\" ]; then echo CONTROL_READY:OK; else echo CONTROL_READY:BAD; fi" \
   >/dev/null
 "$cli" --socket "$socket" key --pane 1 Enter >/dev/null
 for _ in {1..100}; do
   screen="$("$cli" --socket "$socket" read-screen --pane 1)"
-  if rg -Fq "CONTROL_READY:OK" <<<"$screen"; then
+  if grep -Fq -- "CONTROL_READY:OK" <<<"$screen"; then
     break
   fi
   sleep 0.05
 done
-if ! rg -Fq "CONTROL_READY:OK" <<<"${screen:-}"; then
+if ! grep -Fq -- "CONTROL_READY:OK" <<<"${screen:-}"; then
   printf '%s\n' "${screen:-<empty screen>}" >&2
   cat "$app_log" >&2
   echo "control smoke failed: pane environment or read-screen mismatch" >&2

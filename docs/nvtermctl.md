@@ -2,7 +2,8 @@
 
 `nvtermctl` controls a running Neovide Tabs instance through its local
 Unix-domain socket. The executable is bundled inside `Neovide Tabs.app` and is
-also placed on the `PATH` of every terminal pane.
+also prepended to the initial `PATH` of every terminal pane. Use the absolute
+`$NVTERMCTL` value when a shell startup file replaces `PATH`.
 
 ## Discovery
 
@@ -22,22 +23,22 @@ Outside the application, pass `--socket PATH`. If it is omitted, the CLI checks
 ## Commands
 
 ```sh
-nvtermctl list
-nvtermctl read-screen --pane 1
-nvtermctl send --pane 1 "printf 'hello\n'"
-nvtermctl send --pane 1 - < input.txt
-nvtermctl key --pane 1 Enter
-nvtermctl key --pane 1 Ctrl+C
+"$NVTERMCTL" list
+"$NVTERMCTL" read-screen --pane 1
+"$NVTERMCTL" send --pane 1 "printf 'hello\n'"
+"$NVTERMCTL" send --pane 1 - < input.txt
+"$NVTERMCTL" key --pane 1 Enter
+"$NVTERMCTL" key --pane 1 Ctrl+C
 
-nvtermctl new-tab --cwd /path/to/project
-nvtermctl split --pane 1 --vertical --cwd /path/to/project
-nvtermctl split --pane 1 --horizontal
-nvtermctl rename-tab --tab 1 "build"
-nvtermctl set-theme --tab 1 Harbor
+"$NVTERMCTL" new-tab --cwd /path/to/project
+"$NVTERMCTL" split --pane 1 --vertical --cwd /path/to/project
+"$NVTERMCTL" split --pane 1 --horizontal
+"$NVTERMCTL" rename-tab --tab 1 "build"
+"$NVTERMCTL" set-theme --tab 1 Harbor
 
-nvtermctl status set --pane 1 running "running tests"
-nvtermctl status wait --pane 1 --timeout 300
-nvtermctl status set --pane 1 done "tests passed"
+"$NVTERMCTL" status set --pane 1 running "running tests"
+"$NVTERMCTL" status wait --pane 1 --timeout 300
+"$NVTERMCTL" status set --pane 1 done "tests passed"
 ```
 
 `--pane` defaults to `NVTERM_PANE_ID`, and `--tab` defaults to

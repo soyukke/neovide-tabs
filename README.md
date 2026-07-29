@@ -235,14 +235,16 @@ Every pane receives `NVTERM_SOCKET`, `NVTERM_TAB_ID`, `NVTERM_PANE_ID`, and
 `NVTERMCTL`, and can invoke:
 
 ```sh
-nvtermctl list
-nvtermctl read-screen
-nvtermctl split --vertical
-nvtermctl status set running "working"
-nvtermctl status wait --timeout 300
+"$NVTERMCTL" list
+"$NVTERMCTL" read-screen
+"$NVTERMCTL" split --vertical
+"$NVTERMCTL" status set running "working"
+"$NVTERMCTL" status wait --timeout 300
 ```
 
 The app bundle also contains `Contents/MacOS/nvtermctl` for external scripts.
+Its directory is prepended to the pane's initial `PATH`; use `$NVTERMCTL` when
+a shell startup file replaces `PATH`.
 The Unix socket is owner-only, verifies the peer UID, and has bounded request,
 client, and timeout limits; it is not a remote-control interface. See
 [`docs/nvtermctl.md`](docs/nvtermctl.md) for commands, JSON behavior, and the

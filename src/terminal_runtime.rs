@@ -807,10 +807,14 @@ fn configure_shell_command(cmd: &mut CommandBuilder, config: &TerminalSpawnConfi
     cmd.env("COLORTERM", "truecolor");
     cmd.env("NVTERM_PROTO", "libghostty-vt");
     for (key, value) in &config.environment {
-        if key.starts_with("NVTERM_") || key == "PATH" {
+        if allowed_terminal_environment_key(key) {
             cmd.env(key, value);
         }
     }
+}
+
+fn allowed_terminal_environment_key(key: &str) -> bool {
+    key.starts_with("NVTERM_") || key == "NVTERMCTL" || key == "PATH"
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2256,6 +2260,15 @@ mod tests {
 
         assert!(configured_shell(path.to_str()).is_err());
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn terminal_environment_allows_control_discovery_without_arbitrary_injection() {
+        assert!(allowed_terminal_environment_key("NVTERM_SOCKET"));
+        assert!(allowed_terminal_environment_key("NVTERMCTL"));
+        assert!(allowed_terminal_environment_key("PATH"));
+        assert!(!allowed_terminal_environment_key("HOME"));
+        assert!(!allowed_terminal_environment_key("DYLD_INSERT_LIBRARIES"));
     }
 
     #[test]
