@@ -42,8 +42,18 @@ esac
 rm -rf -- "$app_path"
 mkdir -p "$contents/MacOS" "$contents/Resources"
 
-MACOSX_DEPLOYMENT_TARGET="$minimum_macos" cargo build --release --lib --bin nvtermctl
 sdk="$(env -u SDKROOT -u DEVELOPER_DIR /usr/bin/xcrun --sdk macosx --show-sdk-path)"
+portable_ldflags=("-L$sdk/usr/lib")
+read -r -a inherited_ldflags <<<"${NIX_LDFLAGS:-}"
+for flag in "${inherited_ldflags[@]}"; do
+  case "$flag" in
+    -L/nix/store/*-libiconv-*/lib) ;;
+    *) portable_ldflags+=("$flag") ;;
+  esac
+done
+NIX_LDFLAGS="${portable_ldflags[*]}" \
+  MACOSX_DEPLOYMENT_TARGET="$minimum_macos" \
+  cargo build --release --lib --bin nvtermctl
 tmp_binary="$package_root/neovide-tabs.$$"
 trap 'rm -f "$tmp_binary"' EXIT INT TERM
 
@@ -112,6 +122,15 @@ jq -e '
 ' "$contents/Resources/update-signing-public-key.json" >/dev/null
 test -x "$contents/Resources/apply-update"
 test -x "$control_binary"
+for packaged_binary in "$binary" "$control_binary"; do
+  if /usr/bin/otool -L "$packaged_binary" |
+    awk 'NR > 1 { print $1 }' |
+    grep -Eq '^/nix/store/'; then
+    echo "packaged binary depends on the Nix store: $packaged_binary" >&2
+    /usr/bin/otool -L "$packaged_binary" >&2
+    exit 65
+  fi
+done
 if [[ "$(lipo -archs "$control_binary")" != "arm64" ]]; then
   echo "nvtermctl is not an exact arm64 binary" >&2
   exit 65
