@@ -40,6 +40,8 @@ just native-build # build the AppKit/Metal host without launching it
 just native-package # build and locally verify a hardened-runtime .app
 just native-release # build a ZIP plus checksummed update manifest
 just native-update-test # test version ordering and GitHub update metadata
+just native-update-install-smoke # test atomic replacement and rollback paths
+just native-update-release-smoke # verify a signed ZIP with the embedded key
 just native-notarize # Developer ID sign, notarize, staple, and assess the .app
 just native-smoke # launch the native host briefly and write a PNG smoke shot
 just native-package-smoke # visually verify the exact Release .app executable
@@ -114,8 +116,8 @@ Pushing a tag that exactly matches the Cargo package version publishes a GitHub
 Release after the full verification and packaged-application smoke gates pass:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 The tag workflow runs on GitHub's Apple Silicon runner, attaches the arm64 ZIP
@@ -134,15 +136,29 @@ repository.
 The packaged application checks GitHub's latest Release once after launch. It
 stays silent when current or offline and presents an alert only when a newer
 semantic version is available. Help → Check for Updates… performs the same
-check interactively and reports every outcome. Download Update opens the exact
-arm64 Release asset.
+check interactively and reports every outcome.
 
-The manifest checksum permits manual detection of accidental corruption but is
-fetched from the same GitHub trust boundary as the archive. It is not an
-independent publisher signature, so the application does not silently replace
-or execute itself. Automatic installation requires a separately trusted updater
-signature, such as an embedded Ed25519 public key; this does not require an
-Apple Developer ID.
+Version 0.1.1 is the one-time updater bootstrap and must replace 0.1.0
+manually. Beginning with the release after 0.1.1, Update and Restart downloads
+the exact arm64 asset and schema-2 manifest, validates its declared size and
+SHA-256, verifies its Ed25519 publisher signature, extracts and validates the
+bundle ID/version/architecture/code signature, then stages it alongside the
+installed application. A detached helper waits for the old process to exit,
+swaps the staged bundle into place, launches it, and moves the previous bundle
+to the user's Trash so rollback remains possible.
+
+The Ed25519 public key and identifier are checked in at
+[`assets/update-signing-public-key.json`](assets/update-signing-public-key.json).
+The private key is never stored in the repository. Release Actions read
+`UPDATE_SIGNING_PRIVATE_KEY_B64` from GitHub Actions Secrets. The maintainer's
+recoverable local copy is stored in macOS Keychain under service
+`dev.soyukke.neovide-tabs.update-signing`, account `soyukke`. Losing both copies
+would prevent existing installations from trusting future updates, so key
+rotation must be shipped and cross-signed before retiring this key.
+
+This updater signature authenticates project releases without an Apple
+Developer ID. It does not remove the first-install Gatekeeper warning; Apple
+notarization remains a separate trust boundary.
 
 Rust diagnostic verbosity is controlled by
 `NVTERM_LOG=off|error|warn|info|debug|trace`; native lifecycle/runtime/session

@@ -11,6 +11,8 @@ executable="$app_path/Contents/MacOS/neovide-tabs"
 
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$app_path"
 test -s "$app_path/Contents/Resources/AppIcon.icns"
+test -s "$app_path/Contents/Resources/update-signing-public-key.json"
+test -x "$app_path/Contents/Resources/apply-update"
 test "$(
   env -u SDKROOT -u DEVELOPER_DIR /usr/bin/vtool -show-build "$executable" |
     awk '/minos/ {print $2; exit}'

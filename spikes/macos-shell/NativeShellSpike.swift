@@ -157,7 +157,10 @@ struct AppSemanticVersion: Comparable {
 
 struct AvailableAppUpdate {
     let version: String
+    let archiveName: String
+    let archiveSize: Int64
     let downloadURL: URL
+    let manifestURL: URL
     let releaseNotesURL: URL
 }
 
@@ -172,6 +175,7 @@ enum AppUpdateError: LocalizedError {
     case invalidResponse
     case invalidRelease
     case missingArm64Asset
+    case missingManifestAsset
     case responseTooLarge
     case serverStatus(Int)
 
@@ -187,6 +191,8 @@ enum AppUpdateError: LocalizedError {
             return "The latest GitHub Release has invalid version metadata."
         case .missingArm64Asset:
             return "The latest GitHub Release does not contain an Apple Silicon download."
+        case .missingManifestAsset:
+            return "The latest GitHub Release does not contain an update manifest."
         case .responseTooLarge:
             return "The update response exceeded the allowed size."
         case let .serverStatus(status):
@@ -199,10 +205,12 @@ final class AppUpdateChecker {
     private struct GitHubRelease: Decodable {
         struct Asset: Decodable {
             let name: String
+            let size: Int64
             let downloadURL: URL
 
             enum CodingKeys: String, CodingKey {
                 case name
+                case size
                 case downloadURL = "browser_download_url"
             }
         }
@@ -319,16 +327,33 @@ final class AppUpdateChecker {
             + "\(release.tagName)/\(expectedAssetName)"
         guard let asset = release.assets.first(where: { asset in
             asset.name == expectedAssetName
+                && asset.size > 0
+                && asset.size <= 536_870_912
                 && asset.downloadURL.scheme == "https"
                 && asset.downloadURL.host == "github.com"
                 && asset.downloadURL.path == expectedAssetPath
         }) else {
             throw AppUpdateError.missingArm64Asset
         }
+        let expectedManifestPath = "/soyukke/neovide-tabs/releases/download/"
+            + "\(release.tagName)/latest.json"
+        guard let manifest = release.assets.first(where: { asset in
+            asset.name == "latest.json"
+                && asset.size > 0
+                && asset.size <= 65_536
+                && asset.downloadURL.scheme == "https"
+                && asset.downloadURL.host == "github.com"
+                && asset.downloadURL.path == expectedManifestPath
+        }) else {
+            throw AppUpdateError.missingManifestAsset
+        }
         return .available(
             AvailableAppUpdate(
                 version: version,
+                archiveName: expectedAssetName,
+                archiveSize: asset.size,
                 downloadURL: asset.downloadURL,
+                manifestURL: manifest.downloadURL,
                 releaseNotesURL: release.releaseNotesURL
             )
         )
@@ -352,10 +377,18 @@ final class AppUpdateChecker {
         {
           "tag_name": "v1.2.4",
           "html_url": "https://github.com/soyukke/neovide-tabs/releases/tag/v1.2.4",
-          "assets": [{
-            "name": "Neovide-Tabs-1.2.4-macOS-arm64.zip",
-            "browser_download_url": "https://github.com/soyukke/neovide-tabs/releases/download/v1.2.4/Neovide-Tabs-1.2.4-macOS-arm64.zip"
-          }]
+          "assets": [
+            {
+              "name": "Neovide-Tabs-1.2.4-macOS-arm64.zip",
+              "size": 1024,
+              "browser_download_url": "https://github.com/soyukke/neovide-tabs/releases/download/v1.2.4/Neovide-Tabs-1.2.4-macOS-arm64.zip"
+            },
+            {
+              "name": "latest.json",
+              "size": 512,
+              "browser_download_url": "https://github.com/soyukke/neovide-tabs/releases/download/v1.2.4/latest.json"
+            }
+          ]
         }
         """
         guard let data = response.data(using: .utf8),
@@ -5349,8 +5382,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private var shellController: TerminalShellViewController?
     private let updateChecker = AppUpdateChecker()
+    private let updateInstaller = AppUpdateInstaller()
     private var updateCheckID: UUID?
     private var updateTask: URLSessionDataTask?
+    private var updateProgressAlert: NSAlert?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NativeLog.started()
@@ -5539,20 +5574,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.alertStyle = .informational
         alert.messageText = "Neovide Tabs \(update.version) is available"
         alert.informativeText = """
-        You are running \(currentVersion). The Apple Silicon build can be downloaded from GitHub.
-
-        The Release includes a checksum but is not authenticated with a publisher signature.
+        You are running \(currentVersion). The update will be downloaded from GitHub, verified \
+        with the embedded publisher key, installed, and restarted.
         """
-        alert.addButton(withTitle: "Download Update")
+        alert.addButton(withTitle: "Update and Restart")
         alert.addButton(withTitle: "Release Notes")
         alert.addButton(withTitle: "Later")
         switch alert.runModal() {
         case .alertFirstButtonReturn:
-            NSWorkspace.shared.open(update.downloadURL)
+            beginInstallingUpdate(update)
         case .alertSecondButtonReturn:
             NSWorkspace.shared.open(update.releaseNotesURL)
         default:
             break
+        }
+    }
+
+    private func beginInstallingUpdate(_ update: AvailableAppUpdate) {
+        guard updateProgressAlert == nil, let window else {
+            return
+        }
+        let progress = NSProgressIndicator(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 20)
+        )
+        progress.style = .bar
+        progress.isIndeterminate = true
+        progress.startAnimation(nil)
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Installing Neovide Tabs \(update.version)…"
+        alert.informativeText = "Downloading and verifying the signed Apple Silicon update."
+        alert.accessoryView = progress
+        updateProgressAlert = alert
+        alert.beginSheetModal(for: window)
+
+        updateInstaller.prepare(update: update) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else {
+                    return
+                }
+                window.endSheet(alert.window)
+                self.updateProgressAlert = nil
+                switch result {
+                case let .success(prepared):
+                    do {
+                        try self.updateInstaller.launch(prepared)
+                        NativeLog.lifecycleInfo(
+                            "update_install_ready version=\(prepared.version)"
+                        )
+                        NSApp.terminate(nil)
+                    } catch {
+                        self.updateInstaller.discard(prepared)
+                        NativeLog.lifecycleError(
+                            "update_install_launch_failed error=\(error.localizedDescription)"
+                        )
+                        self.presentUpdateInstallError(error, update: update)
+                    }
+                case let .failure(error):
+                    NativeLog.lifecycleError(
+                        "update_install_failed error=\(error.localizedDescription)"
+                    )
+                    self.presentUpdateInstallError(error, update: update)
+                }
+            }
+        }
+    }
+
+    private func presentUpdateInstallError(
+        _ error: Error,
+        update: AvailableAppUpdate
+    ) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Unable to Install Update"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "Download Manually")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(update.downloadURL)
         }
     }
 
@@ -5921,15 +6021,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-if ProcessInfo.processInfo.environment["NVTERM_UPDATE_SELF_TEST"] == "1" {
-    if !AppUpdateChecker.runSelfTests() {
-        fatalError("update self-test failed")
+@main
+struct NeovideTabsApplication {
+    static func main() {
+        if let releaseRoot = ProcessInfo.processInfo.environment[
+            "NVTERM_UPDATE_VERIFY_RELEASE_ROOT"
+        ] {
+            let root = URL(fileURLWithPath: releaseRoot, isDirectory: true)
+            if !AppUpdateInstaller.verifyRelease(at: root) {
+                fatalError("signed release verification failed")
+            }
+            print("signed release verification passed")
+            return
+        }
+        if ProcessInfo.processInfo.environment["NVTERM_UPDATE_SELF_TEST"] == "1" {
+            if !AppUpdateChecker.runSelfTests() || !AppUpdateInstaller.runSelfTests() {
+                fatalError("update self-test failed")
+            }
+            print("update self-test passed")
+            return
+        }
+
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.setActivationPolicy(.regular)
+        app.run()
     }
-    print("update self-test passed")
-} else {
-    let app = NSApplication.shared
-    let delegate = AppDelegate()
-    app.delegate = delegate
-    app.setActivationPolicy(.regular)
-    app.run()
 }

@@ -31,7 +31,9 @@ jobs:
         run: nix develop --command just native-build
 
       - name: Test update discovery
-        run: nix develop --command just native-update-test
+        run: |
+          nix develop --command just native-update-test
+          nix develop --command just native-update-install-smoke
 
       - name: Build application bundle
         run: nix develop --command just native-release
