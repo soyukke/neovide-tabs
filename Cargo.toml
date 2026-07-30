@@ -1,6 +1,6 @@
 [package]
 name = "neovide-tabs"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 license = "MIT"
 
