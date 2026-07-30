@@ -11,7 +11,7 @@ pub const SCROLL_ANIMATION_LENGTH_SECONDS: f32 = 0.3;
 // The command model, retained window line cache, and critically damped spring
 // follow Neovide's MIT-licensed renderer architecture:
 // https://github.com/neovide/neovide
-// Copyright (c) Neovide Contributors.
+// Copyright (c) 2023 Neovide Contributors.
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]

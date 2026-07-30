@@ -17,6 +17,9 @@ entitlements="spikes/macos-shell/NeovideTabs.entitlements"
 icon_source="assets/app-icon.png"
 update_key_source="assets/update-signing-public-key.json"
 update_helper_source="scripts/apply-update"
+project_license_source="LICENSE"
+third_party_notices_source="THIRD_PARTY_NOTICES.md"
+font_license_source="assets/fonts/LICENSE"
 iconset="$package_root/AppIcon.iconset"
 identity="${APPLE_SIGNING_IDENTITY:--}"
 minimum_macos="14.0"
@@ -41,6 +44,8 @@ esac
 
 rm -rf -- "$app_path"
 mkdir -p "$contents/MacOS" "$contents/Resources"
+legal_resources="$contents/Resources/Legal"
+mkdir -p "$legal_resources"
 
 sdk="$(env -u SDKROOT -u DEVELOPER_DIR /usr/bin/xcrun --sdk macosx --show-sdk-path)"
 portable_ldflags=("-L$sdk/usr/lib")
@@ -105,6 +110,14 @@ SIZES
 rm -rf -- "$iconset"
 /usr/bin/ditto "$update_key_source" "$contents/Resources/update-signing-public-key.json"
 /usr/bin/ditto "$update_helper_source" "$contents/Resources/apply-update"
+/usr/bin/ditto "$project_license_source" "$legal_resources/LICENSE.txt"
+/usr/bin/ditto "$third_party_notices_source" "$legal_resources/THIRD_PARTY_NOTICES.md"
+/usr/bin/ditto "$font_license_source" "$legal_resources/FONT_LICENSE.txt"
+cargo about generate \
+  --frozen \
+  --fail \
+  about.hbs \
+  -o "$legal_resources/RUST_DEPENDENCY_LICENSES.html"
 chmod 755 "$contents/Resources/apply-update"
 
 sed \
@@ -114,6 +127,10 @@ sed \
   "$plist_template" >"$contents/Info.plist"
 plutil -lint "$contents/Info.plist"
 test -s "$contents/Resources/AppIcon.icns"
+test -s "$legal_resources/LICENSE.txt"
+test -s "$legal_resources/THIRD_PARTY_NOTICES.md"
+test -s "$legal_resources/FONT_LICENSE.txt"
+test -s "$legal_resources/RUST_DEPENDENCY_LICENSES.html"
 jq -e '
   .schemaVersion == 1
     and .algorithm == "ed25519"

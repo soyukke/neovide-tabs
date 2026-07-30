@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import Darwin
 import Foundation
 import MetalKit
 import OSLog
@@ -196,14 +197,14 @@ enum AppUpdateError: LocalizedError {
 }
 
 final class AppUpdateChecker {
-    private static let repositoryPath = "/soyukke/neovide-tabs"
+    private static let repositoryPath = "/soyukke/satin"
     private static let maximumResponseBytes = 65_536
     private let endpoint: URL
     private let session: URLSession
 
     init(
         endpoint: URL? = URL(
-            string: "https://github.com/soyukke/neovide-tabs/releases/latest/download/latest.json"
+            string: "https://github.com/soyukke/satin/releases/latest/download/latest.json"
         ),
         session: URLSession = .shared
     ) {
@@ -232,7 +233,7 @@ final class AppUpdateChecker {
             timeoutInterval: 15
         )
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("Neovide-Tabs/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("Satin/\(currentVersion)", forHTTPHeaderField: "User-Agent")
 
         let task = session.dataTask(with: request) { data, response, error in
             if let error {
@@ -290,7 +291,7 @@ final class AppUpdateChecker {
         }
         let version = manifest.version
         let tagName = "v\(version)"
-        let expectedAssetName = "Neovide-Tabs-\(version)-macOS-arm64.zip"
+        let expectedAssetName = "Satin-\(version)-macOS-arm64.zip"
         let expectedAssetPath = Self.repositoryPath
             + "/releases/download/\(tagName)/\(expectedAssetName)"
         guard let expectedDownloadURL = URL(
@@ -362,10 +363,10 @@ final class AppUpdateChecker {
           "channel": "development",
           "minimumMacOS": "14.0",
           "architecture": "arm64",
-          "archive": "Neovide-Tabs-1.2.4-macOS-arm64.zip",
+          "archive": "Satin-1.2.4-macOS-arm64.zip",
           "archiveSize": 1024,
           "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-          "downloadURL": "https://github.com/soyukke/neovide-tabs/releases/download/v1.2.4/Neovide-Tabs-1.2.4-macOS-arm64.zip",
+          "downloadURL": "https://github.com/soyukke/satin/releases/download/v1.2.4/Satin-1.2.4-macOS-arm64.zip",
           "notarized": false,
           "signature": {
             "algorithm": "ed25519",
@@ -375,8 +376,8 @@ final class AppUpdateChecker {
         }
         """
         let invalidResponse = response.replacingOccurrences(
-            of: "https://github.com/soyukke/neovide-tabs/releases/download/",
-            with: "https://example.com/soyukke/neovide-tabs/releases/download/"
+            of: "https://github.com/soyukke/satin/releases/download/",
+            with: "https://example.com/soyukke/satin/releases/download/"
         )
         guard let data = response.data(using: .utf8),
               let invalidData = invalidResponse.data(using: .utf8),
@@ -387,7 +388,7 @@ final class AppUpdateChecker {
               update.version == "1.2.4",
               update.archiveSize == 1024,
               update.manifestURL.path
-                == "/soyukke/neovide-tabs/releases/download/v1.2.4/latest.json",
+                == "/soyukke/satin/releases/download/v1.2.4/latest.json",
               case .current = try? evaluate(data: data, currentVersion: "1.2.4"),
               case nil = try? evaluate(data: invalidData, currentVersion: "1.2.3")
         else {
@@ -6089,6 +6090,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         beginUpdateCheck(interactive: true)
     }
 
+    @objc func showAcknowledgements(_ sender: Any?) {
+        guard let notices = Bundle.main.url(
+            forResource: "THIRD_PARTY_NOTICES",
+            withExtension: "md",
+            subdirectory: "Legal"
+        ) else {
+            NSSound.beep()
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([notices])
+    }
+
     private func scheduleAutomaticUpdateCheck() {
         guard ProcessInfo.processInfo.environment["NVTERM_NATIVE_SMOKE_SCENARIO"] == nil else {
             return
@@ -6591,6 +6604,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .checkForUpdates
             )
         )
+        menu.addItem(NSMenuItem.separator())
+        let acknowledgements = NSMenuItem(
+            title: "Acknowledgements…",
+            action: #selector(showAcknowledgements(_:)),
+            keyEquivalent: ""
+        )
+        acknowledgements.target = self
+        menu.addItem(acknowledgements)
         item.submenu = menu
         return item
     }
@@ -6620,13 +6641,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 @main
 struct NeovideTabsApplication {
+    private static func failDiagnostic(_ message: String) -> Never {
+        fputs("\(message)\n", stderr)
+        exit(EXIT_FAILURE)
+    }
+
     static func main() {
+        if let releaseRoot = ProcessInfo.processInfo.environment[
+            "NVTERM_UPDATE_VERIFY_INSTALLABLE_RELEASE_ROOT"
+        ] {
+            let root = URL(fileURLWithPath: releaseRoot, isDirectory: true)
+            if !AppUpdateInstaller.verifyInstallableRelease(at: root) {
+                failDiagnostic("installable release verification failed")
+            }
+            print("installable release verification passed")
+            return
+        }
         if let releaseRoot = ProcessInfo.processInfo.environment[
             "NVTERM_UPDATE_VERIFY_RELEASE_ROOT"
         ] {
             let root = URL(fileURLWithPath: releaseRoot, isDirectory: true)
             if !AppUpdateInstaller.verifyRelease(at: root) {
-                fatalError("signed release verification failed")
+                failDiagnostic("signed release verification failed")
             }
             print("signed release verification passed")
             return
@@ -6635,7 +6671,7 @@ struct NeovideTabsApplication {
             if !AppUpdateChecker.runSelfTests()
                 || !AppUpdateInstaller.runSelfTests()
                 || !NativeSettingsStore.runSelfTests() {
-                fatalError("update self-test failed")
+                failDiagnostic("update self-test failed")
             }
             print("update self-test passed")
             return
@@ -6650,7 +6686,7 @@ struct NeovideTabsApplication {
                 currentVersion: currentVersion,
                 expected: expected
             ) {
-                fatalError("update live smoke failed")
+                failDiagnostic("update live smoke failed")
             }
             return
         }
