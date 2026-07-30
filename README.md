@@ -153,8 +153,9 @@ at 100 columns via `rustfmt.toml`.
 Git pre-commit hooks live in [`.githooks`](.githooks). Run `just install-hooks`
 once per clone to make Git use them. The pre-commit hook runs `just precommit`,
 which first scans staged changes with Gitleaks, then performs
-`cargo fmt -- --check`, Clippy with `-D warnings`, `cargo test`, ShellCheck, and
-GitHub Actions validation. Gitleaks is provided by the Nix development shell;
+`cargo fmt -- --check`, Clippy with `-D warnings`, `cargo test`, the bundled
+license/provenance audit, ShellCheck, and GitHub Actions validation. Gitleaks is
+provided by the Nix development shell;
 no Homebrew or globally installed hook framework is required. `just secrets`
 performs the publication-grade full-history and worktree scan used by CI.
 
