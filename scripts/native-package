@@ -114,7 +114,7 @@ rm -rf -- "$iconset"
 /usr/bin/ditto "$third_party_notices_source" "$legal_resources/THIRD_PARTY_NOTICES.md"
 /usr/bin/ditto "$font_license_source" "$legal_resources/FONT_LICENSE.txt"
 cargo about generate \
-  --frozen \
+  --locked \
   --fail \
   about.hbs \
   -o "$legal_resources/RUST_DEPENDENCY_LICENSES.html"

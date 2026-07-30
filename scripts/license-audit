@@ -33,7 +33,7 @@ case "$license_report" in
 esac
 trap 'rm -f -- "$license_report"' EXIT INT TERM
 
-cargo about generate --frozen --fail about.hbs -o "$license_report"
+cargo about generate --locked --fail about.hbs -o "$license_report"
 test -s "$license_report"
 grep -F "Third Party Licenses" "$license_report" >/dev/null
 grep -F "libghostty-vt" "$license_report" >/dev/null
