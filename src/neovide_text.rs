@@ -1,3 +1,7 @@
+// Font shaping, fallback, and cache structure adapted from Neovide's
+// MIT-licensed renderer. Copyright (c) 2023 Neovide Contributors.
+// See THIRD_PARTY_NOTICES.md for the audited source revision and license.
+
 use crate::terminal_runtime::{
     TerminalCellSnapshot, TerminalCellStyle, TerminalColor, TerminalUnderlineStyle,
 };

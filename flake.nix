@@ -27,6 +27,7 @@
               pkgs.actionlint
               pkgs.clippy
               pkgs.cargo
+              pkgs.cargo-about
               pkgs.git
               pkgs.gitleaks
               pkgs.just

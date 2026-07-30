@@ -1,3 +1,7 @@
+// The Skia/Metal boundary follows Neovide's MIT-licensed Metal renderer.
+// Copyright (c) 2023 Neovide Contributors.
+// See THIRD_PARTY_NOTICES.md for the audited source revision and license.
+
 #[derive(Clone, Copy, Debug)]
 pub struct SkiaRenderGeometry {
     pub width: i32,

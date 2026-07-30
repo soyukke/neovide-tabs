@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+  exec nix develop --command ./scripts/license-audit "$@"
+fi
+
+expected_fira_hash="f6ce2df86c65720b6aa0b1c948bcc63b16ce21a441488e61fb3b5e8b56486b3a"
+expected_last_resort_hash="2cdfa3f7d70ee06c32e9bb37c94634cecd54ba018e5a8110e853b394e0f91f01"
+actual_fira_hash="$(shasum -a 256 assets/fonts/FiraCodeNerdFont-Regular.ttf | awk '{print $1}')"
+actual_last_resort_hash="$(shasum -a 256 assets/fonts/LastResort-Regular.ttf | awk '{print $1}')"
+test "$actual_fira_hash" = "$expected_fira_hash"
+test "$actual_last_resort_hash" = "$expected_last_resort_hash"
+
+grep -F "Copyright (c) 2023 Neovide Contributors" THIRD_PARTY_NOTICES.md >/dev/null
+grep -F "Copyright (c) 2023 Neovide Contributors" src/neovide_render.rs >/dev/null
+grep -F "Copyright (c) 2023 Neovide Contributors" src/neovide_text.rs >/dev/null
+grep -F "Copyright (c) 2023 Neovide Contributors" src/skia_metal.rs >/dev/null
+grep -F "618605b79d70577f4b7ec92b50b3b9b5bf482c1a" THIRD_PARTY_NOTICES.md >/dev/null
+grep -F "$expected_fira_hash" THIRD_PARTY_NOTICES.md >/dev/null
+grep -F "$expected_last_resort_hash" THIRD_PARTY_NOTICES.md >/dev/null
+grep -F "Copyright 2014-2021 The Fira Code Project Authors" assets/fonts/LICENSE >/dev/null
+grep -F "Copyright © 2020 Unicode, Inc." assets/fonts/LICENSE >/dev/null
+grep -F "SIL OPEN FONT LICENSE Version 1.1" assets/fonts/LICENSE >/dev/null
+
+license_report="$(mktemp "${TMPDIR:-/tmp}/neovide-tabs-license-audit.XXXXXX.html")"
+case "$license_report" in
+  "${TMPDIR:-/tmp}"/neovide-tabs-license-audit.*.html) ;;
+  *)
+    echo "refusing unexpected license audit path: $license_report" >&2
+    exit 70
+    ;;
+esac
+trap 'rm -f -- "$license_report"' EXIT INT TERM
+
+cargo about generate --locked --fail about.hbs -o "$license_report"
+test -s "$license_report"
+grep -F "Third Party Licenses" "$license_report" >/dev/null
+grep -F "libghostty-vt" "$license_report" >/dev/null
+grep -F "skia-safe" "$license_report" >/dev/null
+grep -F "swash" "$license_report" >/dev/null
+printf 'license audit passed\n'

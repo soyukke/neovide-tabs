@@ -312,7 +312,7 @@ lint:
 
 # Run the checks enforced by the Git pre-commit hook.
 precommit:
-    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just precommit; else just secrets-staged && cargo fmt -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test && just ops-lint; fi
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just precommit; else just secrets-staged && cargo fmt -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test && just license-audit && just ops-lint; fi
 
 # Scan staged changes before a commit without printing detected values.
 secrets-staged:
@@ -333,7 +333,7 @@ secrets:
 
 # Lint release/smoke shell scripts and GitHub Actions workflows.
 ops-lint:
-    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just ops-lint; else shellcheck scripts/apply-update scripts/native-build scripts/native-control-smoke scripts/native-kitty-smoke scripts/native-package scripts/native-package-smoke scripts/native-notarize scripts/native-release scripts/native-resize-smoke scripts/native-session-smoke scripts/native-settings-smoke scripts/native-smoke scripts/native-soak scripts/native-update-install-smoke scripts/native-update-release-smoke && actionlint .github/workflows/*.yml; fi
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just ops-lint; else shellcheck scripts/apply-update scripts/license-audit scripts/native-build scripts/native-control-smoke scripts/native-kitty-smoke scripts/native-package scripts/native-package-smoke scripts/native-notarize scripts/native-release scripts/native-resize-smoke scripts/native-session-smoke scripts/native-settings-smoke scripts/native-smoke scripts/native-soak scripts/native-update-install-smoke scripts/native-update-release-smoke && actionlint .github/workflows/*.yml; fi
 
 # Configure this clone to use the repository-managed Git hooks.
 install-hooks:
@@ -347,7 +347,11 @@ fmt:
 
 # Verify formatting, type checking, linting, and tests.
 verify:
-    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just verify; else cargo fmt -- --check && cargo check && cargo clippy --all-targets --all-features -- -D warnings && cargo test && just ops-lint; fi
+    @if [[ -z "${IN_NIX_SHELL:-}" ]]; then exec nix develop --command just verify; else cargo fmt -- --check && cargo check && cargo clippy --all-targets --all-features -- -D warnings && cargo test && just license-audit && just ops-lint; fi
+
+# Verify third-party attribution, exact bundled font provenance, and Cargo licenses.
+license-audit:
+    @./scripts/license-audit
 
 # Remove Rust build artifacts.
 clean:

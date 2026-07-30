@@ -21,31 +21,44 @@ trap 'rm -rf -- "$smoke_root"' EXIT INT TERM
 applications="$smoke_root/Applications"
 trash_root="$smoke_root/user/.Trash"
 current="$applications/Neovide Tabs.app"
-staged="$applications/.Neovide Tabs.update.smoke.app"
+destination="$applications/Satin.app"
+staged="$applications/.Satin.update.smoke.app"
 backup="$applications/.Neovide Tabs.previous.smoke.app"
 trash="$trash_root/Neovide Tabs.previous.smoke.app"
 mkdir -p "$applications" "$trash_root"
 /usr/bin/ditto "$source_app" "$current"
 /usr/bin/ditto "$source_app" "$staged"
+/usr/libexec/PlistBuddy \
+  -c 'Set :CFBundleIdentifier dev.soyukke.satin' \
+  "$staged/Contents/Info.plist"
 printf 'staged\n' >"$staged/Contents/Resources/update-smoke-marker"
 /usr/bin/codesign --force --sign - --options runtime --timestamp=none "$staged"
 
 /bin/sleep 0.2 &
 wait_pid=$!
-scripts/apply-update "$current" "$staged" "$backup" "$trash" "$wait_pid" smoke
+scripts/apply-update \
+  "$current" \
+  "$staged" \
+  "$destination" \
+  "$backup" \
+  "$trash" \
+  "$wait_pid" \
+  smoke
 wait "$wait_pid" 2>/dev/null || true
 
-test -f "$current/Contents/Resources/update-smoke-marker"
+test ! -e "$current"
+test -f "$destination/Contents/Resources/update-smoke-marker"
 test ! -e "$staged"
 test ! -e "$backup"
 test -d "$trash"
 test ! -e "$trash/Contents/Resources/update-smoke-marker"
-/usr/bin/codesign --verify --deep --strict --verbose=2 "$current"
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$destination"
 
 rollback_applications="$smoke_root/rollback/Applications"
 rollback_trash_root="$smoke_root/rollback/user/.Trash"
 rollback_current="$rollback_applications/Neovide Tabs.app"
-rollback_staged="$rollback_applications/.Neovide Tabs.update.rollback.app"
+rollback_destination="$rollback_applications/Satin.app"
+rollback_staged="$rollback_applications/.Satin.update.rollback.app"
 rollback_backup="$rollback_applications/.Neovide Tabs.previous.rollback.app"
 rollback_trash="$rollback_trash_root/Neovide Tabs.previous.rollback.app"
 mkdir -p "$rollback_applications" "$rollback_trash_root"
@@ -58,6 +71,7 @@ rollback_wait_pid=$!
 if scripts/apply-update \
   "$rollback_current" \
   "$rollback_staged" \
+  "$rollback_destination" \
   "$rollback_backup" \
   "$rollback_trash" \
   "$rollback_wait_pid" \
@@ -70,6 +84,7 @@ fi
 wait "$rollback_wait_pid" 2>/dev/null || true
 
 test -d "$rollback_current"
+test ! -e "$rollback_destination"
 test ! -e "$rollback_current/Contents/Resources/update-smoke-marker"
 test -f "$rollback_staged/Contents/Resources/update-smoke-marker"
 test ! -e "$rollback_backup"

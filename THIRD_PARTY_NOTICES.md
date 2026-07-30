@@ -7,6 +7,11 @@ scrollback animation structure, font shaping/cache structure, and critically
 damped spring animation are adapted from Neovide.
 
 - Source: https://github.com/neovide/neovide
+- Audited source revision:
+  https://github.com/neovide/neovide/commit/618605b79d70577f4b7ec92b50b3b9b5bf482c1a
+- Adapted source areas:
+  `src/renderer/animation_utils.rs`, `src/renderer/rendered_window.rs`,
+  `src/renderer/fonts/`, and `src/renderer/metal.rs`
 - License: MIT
 
 ```text
@@ -35,6 +40,30 @@ SOFTWARE.
 
 ## Bundled Fonts
 
-The fallback fonts in `assets/fonts/` are copied from Neovide's font assets.
-They are distributed under the SIL Open Font License 1.1. The full license text
-is kept in `assets/fonts/LICENSE`.
+The fallback fonts in `assets/fonts/` are byte-for-byte copies of Neovide's
+font assets at the audited source revision above. They are embedded in the
+application binary and remain under the SIL Open Font License 1.1.
+
+- `FiraCodeNerdFont-Regular.ttf`
+  - SHA-256:
+    `f6ce2df86c65720b6aa0b1c948bcc63b16ce21a441488e61fb3b5e8b56486b3a`
+  - Copyright 2014-2021 The Fira Code Project Authors
+  - Fira Code 6.002, patched with Nerd Fonts 2.1.0
+  - Sources: https://github.com/tonsky/FiraCode and
+    https://github.com/ryanoasis/nerd-fonts
+- `LastResort-Regular.ttf`
+  - SHA-256:
+    `2cdfa3f7d70ee06c32e9bb37c94634cecd54ba018e5a8110e853b394e0f91f01`
+  - Copyright © 2020 Unicode, Inc.
+  - Last Resort 13.001 for Unicode 13.0.0
+  - Source: https://github.com/unicode-org/last-resort-font
+
+The copyright notices and full OFL text are kept in `assets/fonts/LICENSE` and
+are included in every application bundle under `Contents/Resources/Legal/`.
+
+## Rust Dependencies
+
+The application statically links permissively licensed Rust dependencies.
+Their resolved license texts and source links are generated from `Cargo.lock`
+with `cargo-about` and included in every application bundle as
+`Contents/Resources/Legal/RUST_DEPENDENCY_LICENSES.html`.

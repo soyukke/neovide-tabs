@@ -1,34 +1,54 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 6 ]; then
-  echo "usage: apply-update CURRENT STAGED BACKUP TRASH PID MODE" >&2
+if [ "$#" -ne 7 ]; then
+  echo "usage: apply-update CURRENT STAGED DESTINATION BACKUP TRASH PID MODE" >&2
   exit 64
 fi
 
 current=$1
 staged=$2
-backup=$3
-trash=$4
+destination=$3
+backup=$4
+trash=$5
 parent=$(/usr/bin/dirname "$current")
-pid=$5
-mode=$6
+destination_parent=$(/usr/bin/dirname "$destination")
+pid=$6
+mode=$7
 
 case "$current" in
-  */Neovide\ Tabs.app) ;;
+  */Neovide\ Tabs.app | */Satin.app) ;;
   *) echo "refusing unexpected current application path: $current" >&2; exit 64 ;;
 esac
+if [ "$destination_parent" != "$parent" ] || [ "$destination" != "$parent/Satin.app" ]; then
+  echo "refusing unexpected destination application path: $destination" >&2
+  exit 64
+fi
 case "$staged" in
-  "$parent"/.Neovide\ Tabs.update.*.app) ;;
+  "$parent"/.Satin.update.*.app) ;;
   *) echo "refusing unexpected staged application path: $staged" >&2; exit 64 ;;
 esac
-case "$backup" in
-  "$parent"/.Neovide\ Tabs.previous.*.app) ;;
-  *) echo "refusing unexpected backup application path: $backup" >&2; exit 64 ;;
-esac
-case "$trash" in
-  */.Trash/Neovide\ Tabs.previous.*.app) ;;
-  *) echo "refusing unexpected Trash path: $trash" >&2; exit 64 ;;
+case "$current" in
+  */Neovide\ Tabs.app)
+    case "$backup" in
+      "$parent"/.Neovide\ Tabs.previous.*.app) ;;
+      *) echo "refusing unexpected backup application path: $backup" >&2; exit 64 ;;
+    esac
+    case "$trash" in
+      */.Trash/Neovide\ Tabs.previous.*.app) ;;
+      *) echo "refusing unexpected Trash path: $trash" >&2; exit 64 ;;
+    esac
+    ;;
+  */Satin.app)
+    case "$backup" in
+      "$parent"/.Satin.previous.*.app) ;;
+      *) echo "refusing unexpected backup application path: $backup" >&2; exit 64 ;;
+    esac
+    case "$trash" in
+      */.Trash/Satin.previous.*.app) ;;
+      *) echo "refusing unexpected Trash path: $trash" >&2; exit 64 ;;
+    esac
+    ;;
 esac
 case "$pid" in
   '' | *[!0-9]*) echo "invalid application pid: $pid" >&2; exit 64 ;;
@@ -40,6 +60,9 @@ esac
 
 test -d "$current"
 test -d "$staged"
+if [ "$destination" != "$current" ]; then
+  test ! -e "$destination"
+fi
 test ! -e "$backup"
 test ! -e "$trash"
 
@@ -54,19 +77,27 @@ while /bin/kill -0 "$pid" 2>/dev/null; do
 done
 
 /bin/mv "$current" "$backup"
-if ! /bin/mv "$staged" "$current"; then
+if ! /bin/mv "$staged" "$destination"; then
   /bin/mv "$backup" "$current"
   exit 74
 fi
 
-if ! /usr/bin/codesign --verify --deep --strict "$current"; then
-  /bin/mv "$current" "$staged"
+if ! /usr/bin/codesign --verify --deep --strict "$destination"; then
+  /bin/mv "$destination" "$staged"
+  /bin/mv "$backup" "$current"
+  exit 65
+fi
+if [ "$(
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+    "$destination/Contents/Info.plist" 2>/dev/null
+)" != "dev.soyukke.satin" ]; then
+  /bin/mv "$destination" "$staged"
   /bin/mv "$backup" "$current"
   exit 65
 fi
 
-if [ "$mode" = "launch" ] && ! /usr/bin/open -n "$current"; then
-  /bin/mv "$current" "$staged"
+if [ "$mode" = "launch" ] && ! /usr/bin/open -n "$destination"; then
+  /bin/mv "$destination" "$staged"
   /bin/mv "$backup" "$current"
   /usr/bin/open -n "$current" || true
   exit 69

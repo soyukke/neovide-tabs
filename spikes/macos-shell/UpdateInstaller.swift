@@ -26,6 +26,7 @@ struct PreparedAppUpdate {
     let version: String
     let currentApplication: URL
     let stagedApplication: URL
+    let destinationApplication: URL
     let backupApplication: URL
     let trashBackup: URL
     let helper: URL
@@ -63,11 +64,11 @@ enum AppUpdateInstallError: LocalizedError {
         case .downloadFailed:
             return "The update could not be downloaded from GitHub."
         case .invalidApplication:
-            return "The update does not contain a valid Neovide Tabs application."
+            return "The update does not contain a valid Satin application."
         case .unsupportedOperatingSystem:
             return "This update requires a newer version of macOS."
         case .unsupportedInstallLocation:
-            return "Move Neovide Tabs to Applications before updating it."
+            return "Move the application to Applications before updating it."
         case .installLocationNotWritable:
             return "The Applications folder is not writable by the current user."
         case .missingInstallHelper:
@@ -130,9 +131,12 @@ enum UpdateArchiveVerifier {
 final class AppUpdateInstaller {
     private static let maximumManifestBytes = 65_536
     private static let maximumArchiveBytes: Int64 = 536_870_912
+    private static let legacyAppName = "Neovide Tabs.app"
+    private static let targetAppName = "Satin.app"
+    private static let targetBundleIdentifier = "dev.soyukke.satin"
     private let session: URLSession
     private let workerQueue = DispatchQueue(
-        label: "dev.soyukke.neovide-tabs.update-installer",
+        label: "dev.soyukke.satin.update-installer",
         qos: .userInitiated
     )
 
@@ -162,7 +166,7 @@ final class AppUpdateInstaller {
             channel: "development",
             minimumMacOS: "14.0",
             architecture: "arm64",
-            archive: "Neovide-Tabs-1.2.3-macOS-arm64.zip",
+            archive: "Satin-1.2.3-macOS-arm64.zip",
             archiveSize: Int64(archive.count),
             sha256: sha256,
             downloadURL: URL(string: "https://github.com/example/update.zip")!,
@@ -218,6 +222,61 @@ final class AppUpdateInstaller {
                 archive: archive,
                 manifest: manifest,
                 signingKeyData: signingKeyData
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    static func verifyInstallableRelease(at root: URL) -> Bool {
+        let manifestURL = root.appendingPathComponent("latest.json")
+        guard let manifestData = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(
+                  UpdateManifest.self,
+                  from: manifestData
+              ),
+              let keyURL = Bundle.main.url(
+                  forResource: "update-signing-public-key",
+                  withExtension: "json"
+              ),
+              let signingKeyData = try? Data(contentsOf: keyURL)
+        else {
+            return false
+        }
+        let archiveURL = root.appendingPathComponent(manifest.archive)
+        guard let archive = try? Data(contentsOf: archiveURL, options: .mappedIfSafe),
+              Int64(archive.count) == manifest.archiveSize
+        else {
+            return false
+        }
+        let extractionRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "satin-installable-release-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { discard(extractionRoot) }
+        do {
+            try UpdateArchiveVerifier.verify(
+                archive: archive,
+                manifest: manifest,
+                signingKeyData: signingKeyData
+            )
+            try FileManager.default.createDirectory(
+                at: extractionRoot,
+                withIntermediateDirectories: false
+            )
+            try run("/usr/bin/ditto", [
+                "-x",
+                "-k",
+                archiveURL.path,
+                extractionRoot.path,
+            ])
+            try validateApplication(
+                extractionRoot.appendingPathComponent(
+                    targetAppName,
+                    isDirectory: true
+                ),
+                manifest: manifest
             )
             return true
         } catch {
@@ -289,6 +348,9 @@ final class AppUpdateInstaller {
 
     func launch(_ prepared: PreparedAppUpdate) throws {
         guard prepared.currentApplication == Bundle.main.bundleURL.standardizedFileURL,
+              prepared.destinationApplication.deletingLastPathComponent()
+                == prepared.currentApplication.deletingLastPathComponent(),
+              prepared.destinationApplication.lastPathComponent == Self.targetAppName,
               FileManager.default.fileExists(atPath: prepared.stagedApplication.path),
               FileManager.default.fileExists(atPath: prepared.helper.path)
         else {
@@ -301,6 +363,7 @@ final class AppUpdateInstaller {
             prepared.helper.path,
             prepared.currentApplication.path,
             prepared.stagedApplication.path,
+            prepared.destinationApplication.path,
             prepared.backupApplication.path,
             prepared.trashBackup.path,
             String(ProcessInfo.processInfo.processIdentifier),
@@ -314,7 +377,7 @@ final class AppUpdateInstaller {
         let parent = prepared.currentApplication.deletingLastPathComponent()
         guard prepared.stagedApplication.deletingLastPathComponent() == parent,
               prepared.stagedApplication.lastPathComponent.hasPrefix(
-                  ".Neovide Tabs.update."
+                ".Satin.update."
               ),
               prepared.stagedApplication.pathExtension == "app"
         else {
@@ -333,7 +396,7 @@ final class AppUpdateInstaller {
             timeoutInterval: 20
         )
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("Neovide-Tabs/\(update.version)", forHTTPHeaderField: "User-Agent")
+        request.setValue("Satin/\(update.version)", forHTTPHeaderField: "User-Agent")
         session.dataTask(with: request) { data, response, error in
             if error != nil {
                 completion(.failure(AppUpdateInstallError.downloadFailed))
@@ -368,7 +431,7 @@ final class AppUpdateInstaller {
             timeoutInterval: 300
         )
         request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
-        request.setValue("Neovide-Tabs/\(update.version)", forHTTPHeaderField: "User-Agent")
+        request.setValue("Satin/\(update.version)", forHTTPHeaderField: "User-Agent")
         session.downloadTask(with: request) { temporaryURL, response, error in
             guard error == nil,
                   let response = response as? HTTPURLResponse,
@@ -419,7 +482,7 @@ final class AppUpdateInstaller {
         )
         try Self.run("/usr/bin/ditto", ["-x", "-k", archiveURL.path, extractionRoot.path])
         let extractedApp = extractionRoot.appendingPathComponent(
-            "Neovide Tabs.app",
+            Self.targetAppName,
             isDirectory: true
         )
         try Self.validateApplication(extractedApp, manifest: manifest)
@@ -431,7 +494,10 @@ final class AppUpdateInstaller {
         let userApplications = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Applications", isDirectory: true)
             .standardizedFileURL
-        guard currentApp.lastPathComponent == "Neovide Tabs.app",
+        guard (
+            currentApp.lastPathComponent == Self.legacyAppName
+                || currentApp.lastPathComponent == Self.targetAppName
+        ),
               currentApp.pathExtension == "app",
               parent == systemApplications || parent == userApplications
         else {
@@ -444,19 +510,31 @@ final class AppUpdateInstaller {
             throw AppUpdateInstallError.missingInstallHelper
         }
 
-        let identifier = UUID().uuidString
-        let staged = parent.appendingPathComponent(
-            ".Neovide Tabs.update.\(identifier).app",
+        let destination = parent.appendingPathComponent(
+            Self.targetAppName,
             isDirectory: true
         )
+        guard (
+            currentApp == destination
+                || !FileManager.default.fileExists(atPath: destination.path)
+        )
+        else {
+            throw AppUpdateInstallError.invalidApplication
+        }
+        let identifier = UUID().uuidString
+        let staged = parent.appendingPathComponent(
+            ".Satin.update.\(identifier).app",
+            isDirectory: true
+        )
+        let currentBaseName = currentApp.deletingPathExtension().lastPathComponent
         let backup = parent.appendingPathComponent(
-            ".Neovide Tabs.previous.\(identifier).app",
+            ".\(currentBaseName).previous.\(identifier).app",
             isDirectory: true
         )
         let trashRoot = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".Trash", isDirectory: true)
         let trashBackup = trashRoot.appendingPathComponent(
-            "Neovide Tabs.previous.\(identifier).app",
+            "\(currentBaseName).previous.\(identifier).app",
             isDirectory: true
         )
         guard !FileManager.default.fileExists(atPath: staged.path),
@@ -477,6 +555,7 @@ final class AppUpdateInstaller {
             version: update.version,
             currentApplication: currentApp,
             stagedApplication: staged,
+            destinationApplication: destination,
             backupApplication: backup,
             trashBackup: trashBackup,
             helper: helper
@@ -545,7 +624,7 @@ final class AppUpdateInstaller {
         guard values.isDirectory == true,
               values.isSymbolicLink != true,
               let bundle = Bundle(url: app),
-              bundle.bundleIdentifier == "dev.soyukke.neovide-tabs",
+              bundle.bundleIdentifier == targetBundleIdentifier,
               bundle.object(
                   forInfoDictionaryKey: "CFBundleShortVersionString"
               ) as? String == manifest.version,
