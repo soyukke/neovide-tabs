@@ -23,7 +23,7 @@
 > [!IMPORTANT]
 > Neovide Tabs is being renamed to
 > [Satin](https://github.com/soyukke/satin) to establish an independent
-> product identity. Version 0.1.6 is the signed migration bridge: existing
+> product identity. Version 0.1.7 is the final signed migration bridge: existing
 > installations update to it first, then its in-app updater installs
 > `Satin.app` from the new repository without breaking the Ed25519 trust chain.
 
@@ -178,8 +178,8 @@ Pushing a tag that exactly matches the Cargo package version publishes a GitHub
 Release after the full verification and packaged-application smoke gates pass:
 
 ```sh
-git tag v0.1.6
-git push origin v0.1.6
+git tag v0.1.7
+git push origin v0.1.7
 ```
 
 The tag workflow runs on GitHub's Apple Silicon runner, attaches the arm64 ZIP
@@ -203,10 +203,11 @@ check interactively and reports every outcome.
 
 Version 0.1.1 is the one-time updater bootstrap and must replace 0.1.0
 manually. Version 0.1.1 and later can install newer releases through Update and
-Restart. Version 0.1.6 is the final Neovide Tabs release and migration bridge;
-it changes the trusted update feed to `soyukke/satin`, accepts the renamed
-bundle, and atomically replaces `Neovide Tabs.app` with `Satin.app`. The updater
-downloads the exact arm64 asset and schema-2 manifest,
+Restart. Version 0.1.6 introduced the migration bridge. Version 0.1.7 is the
+final, notice-complete Neovide Tabs release; it uses the trusted update feed at
+`soyukke/satin`, accepts the renamed bundle, and atomically replaces
+`Neovide Tabs.app` with `Satin.app`. The updater downloads the exact arm64
+asset and schema-2 manifest,
 validates its declared size and SHA-256, verifies its Ed25519 publisher
 signature, extracts and validates the bundle ID/version/architecture/code
 signature, then stages it alongside the installed application. A detached
